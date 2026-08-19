@@ -44,6 +44,7 @@ class ResampledRaw:
 
 def resample_to_uniform(raw: pl.DataFrame, fs: float = 100.0) -> ResampledRaw:
     """Interpolate a raw set onto a uniform ``fs`` Hz grid; flag large delivery gaps."""
+    _assert_raw_columns(raw)
     t_ns = raw["t_ns"].to_numpy()
     t_src = (t_ns - t_ns[0]) / 1e9  # seconds from set start
     duration = t_src[-1]

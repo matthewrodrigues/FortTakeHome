@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import polars as pl
 
-from wristset.conditioning.filters import bandpass, lowpass
+from wristset.conditioning.filters import bandpass, highpass, lowpass
 from wristset.conditioning.frame import to_world_frame
 from wristset.conditioning.resample import resample_to_uniform
 from wristset.conditioning.zupt import detect_stationary, zupt_integrate
@@ -86,6 +86,13 @@ def condition_set(
     v_vert, disp_vert = zupt_integrate(a_vert_k, stat.anchor_idx, fs)
     v_horiz, disp_horiz = zupt_integrate(a_horiz_k, stat.anchor_idx, fs)
 
+    # ZUPT pins velocity (not displacement) at anchors, so small per-rep residuals
+    # accumulate into slow displacement drift. Absolute displacement carries bias and is
+    # untrustworthy anyway (§5.5, §14); a gentle high-pass removes the drift below the rep
+    # band, leaving a drift-free, zero-referenced signal for segmentation and features.
+    disp_vert = highpass(disp_vert, fs)
+    disp_horiz = highpass(disp_horiz, fs)
+
     # §5.6 quality gates
     quality = _quality_gates(
         n=rr.t.shape[0],
@@ -133,7 +140,12 @@ def _quality_gates(
     flags: list[str] = []
     if gap_intervals:
         flags.append("sample_gaps")
-    if reported_reps is not None and n_stationary < reported_reps:
+    if n_stationary == 0:
+        # No anchors at all -> ZUPT ran uncorrected, so velocity/displacement carry
+        # unbounded integration drift (§5.5). Checked independently of reported_reps,
+        # which is absent whenever a set arrives without trusted metadata.
+        flags.append("no_stationary_anchors")
+    elif reported_reps is not None and n_stationary < reported_reps:
         # fewer stationary anchors than reps -> integration anchors missing (§5.6)
         flags.append("insufficient_stationary")
     return {

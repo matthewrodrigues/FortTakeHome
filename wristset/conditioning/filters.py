@@ -15,7 +15,11 @@ from __future__ import annotations
 import numpy as np
 from scipy.signal import butter, sosfiltfilt
 
-__all__ = ["lowpass", "bandpass", "KINEMATIC_CUTOFF_HZ", "TREMOR_BAND_HZ"]
+__all__ = ["lowpass", "highpass", "bandpass", "KINEMATIC_CUTOFF_HZ", "TREMOR_BAND_HZ", "DISP_DRIFT_HZ"]
+
+#: Displacement drift-removal cutoff. Rep fundamental is 0.3-1 Hz (§3.3); drift from ZUPT
+#: residuals sits below this, so a gentle high-pass removes drift without touching reps.
+DISP_DRIFT_HZ: float = 0.15
 
 #: Kinematic low-pass cutoff. 10 Hz sits just below the 8-12 Hz tremor band so it keeps
 #: rep kinematics while attenuating tremor leakage into velocity/displacement (§5.4).
@@ -36,6 +40,19 @@ def lowpass(x: np.ndarray, fs: float, cutoff: float = KINEMATIC_CUTOFF_HZ, order
     if x.shape[0] <= _min_len_for(order):
         return x.copy()
     sos = butter(order, cutoff / (0.5 * fs), btype="low", output="sos")
+    return sosfiltfilt(sos, x, axis=0)
+
+
+def highpass(x: np.ndarray, fs: float, cutoff: float = DISP_DRIFT_HZ, order: int = 2) -> np.ndarray:
+    """Zero-phase Butterworth high-pass along axis 0. Passes short signals through
+    unchanged — on a signal too short to resolve the cutoff, high-passing would distort
+    more than the drift it removes."""
+    x = np.asarray(x, dtype=np.float64)
+    # need enough cycles of the cutoff to filter meaningfully (~2 periods) and enough
+    # samples for filtfilt padding
+    if x.shape[0] <= max(_min_len_for(order), int(2.0 * fs / cutoff)):
+        return x.copy()
+    sos = butter(order, cutoff / (0.5 * fs), btype="high", output="sos")
     return sosfiltfilt(sos, x, axis=0)
 
 

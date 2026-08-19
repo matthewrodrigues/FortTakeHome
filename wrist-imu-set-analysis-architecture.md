@@ -230,6 +230,23 @@ Interpolate onto a uniform 100 Hz grid using the recorded timestamps. Linear int
 
 If the platform supplies separated gravity and linear acceleration, use it. Otherwise apply a low-pass filter (~0.3 Hz cutoff) to estimate gravity, subtract for linear acceleration. Platform fusion is better — it uses the gyro, whereas naive low-pass fails under sustained acceleration.
 
+> **Implementation note (Phase 1).** Only the platform-supplied path is built; the ~0.3 Hz
+> low-pass fallback is unimplemented, since both the synthetic generator and CoreMotion
+> supply the split. The 0.3 Hz constant that exists in `conditioning/frame.py` smooths an
+> *already-separated* gravity channel to estimate the steady up direction — it is not the
+> fallback separator. Build the fallback only if a source without platform fusion appears.
+>
+> **Ingest must normalize units and gravity sign.** A smoke test over the 164-file Kaggle
+> CoreMotion corpus (2026-08-19) found the corpus is *not* internally consistent: 161 files
+> report acceleration and gravity in **g**, 3 in **m/s²**, and those same 3 carry a
+> **sign-flipped gravity channel** (gravity rotates to world `+Z`, not `−Z`; conjugating the
+> quaternion does not fix it, so this is a source-recording convention, not a handedness
+> mismatch). Neither defect raises an error. A blind `× 9.80665` inflates the SI files ~10×,
+> and because `up_hat` is normalized the magnitude error re-emerges as a *sign* error rather
+> than a scale error — silently plausible output. Any real-data ingest path must therefore
+> **measure** `‖gravity‖` per file (a physical constant, so it is a free unit detector)
+> rather than assume, and record the gravity sign for the polarity issue noted in §5.3.
+
 ### 5.3 Rotate into world frame
 
 **Non-negotiable step.** Using the attitude quaternion `q`, rotate linear acceleration from device frame into a gravity-aligned world frame:
@@ -241,6 +258,27 @@ a_world = q ⊗ a_device ⊗ q*
 Without this, the model learns watch orientation on the wrist rather than movement. Yaw is unconstrained without a magnetometer — resolve it per set by defining the horizontal axes relative to the mean horizontal displacement direction of the first rep, so "forward/back" is consistent within a set even if not globally referenced.
 
 **Vertical axis** (`z_world`) is defined by gravity and is reliable. Most high-value features depend only on vertical displacement, so build those first.
+
+> **Implementation note (Phase 1) — two open items for the feature layer (§6.2).**
+>
+> **1. Per-set yaw resolution is deferred, not done.** `to_world_frame()` leaves the
+> horizontal plane in the quaternion's arbitrary-yaw world frame; the first-rep alignment
+> prescribed above is unimplemented. Phase 1's gate is vertical-only, and the first consumer
+> of horizontal path is the feature layer, so this was deferred rather than guessed at.
+> **Consequence:** `a_horiz`, `v_horiz`, and `disp_horiz` on `ConditionedSet` are currently
+> **not comparable across sets** and have no accuracy test. Any path-consistency feature
+> (§6.2) must resolve yaw first or it will compare incommensurable frames.
+>
+> **2. `a_vert` polarity is per-file, not global.** `up_hat` is derived from *measured*
+> gravity (`−ĝ`) rather than a hardcoded `[0,0,1]`. This is deliberate and it works: on the
+> 3 sign-flipped Kaggle files (§5.2) it returned `up_hat = [0,0,−1]`, the true up for that
+> file's convention, and produced physically correct ROM with no code change — the
+> portability property held on real data. But it means `a_vert` is positive-up *in each
+> file's own frame*. **Consequence:** concentric/eccentric direction reads inverted between
+> those files and the rest, so any feature keyed on the *sign* of vertical motion — tempo
+> phase split, eccentric/concentric duration, peak-velocity direction — must normalize
+> polarity at ingest (§5.2) before use. Magnitude-only features (ROM, path length) are
+> unaffected.
 
 ### 5.4 Filtering
 
@@ -266,6 +304,37 @@ Integration horizon is now ~1–3 s per rep instead of ~60 s per set. Error is b
 
 **Known limitation:** touch-and-go reps with no bottom pause give you only one ZUPT anchor per rep instead of two. Accuracy degrades. Detect and flag this; consider requiring a brief pause during data collection for the prototype.
 
+> **Implementation note (Phase 1) — three deviations from the steps above.**
+>
+> **Gyro is the primary stationary gate, not `|a_linear|`.** Step 1 above treats accel and
+> gyro symmetrically; the implementation does not. At the bottom turnaround velocity is zero
+> but linear acceleration is at its *maximum* (the bar is being reversed), so an accel-led
+> test rejects exactly the bottom anchors it most needs. `GYRO_STATIONARY_THRESH = 0.6 rad/s`
+> is the discriminator; `ACC_STATIONARY_THRESH = 3.0 m/s²` is a loose outlier gate only.
+> Both magnitudes are low-passed at 3 Hz *before* thresholding, because tremor persists
+> during isometric holds and grows with fatigue — unfiltered, it lifts pause-time magnitude
+> above threshold and drops anchors on the latest, most diagnostic reps. Validated on real
+> data (2026-08-19): 160/161 single-set Kaggle files yielded ≥1 anchor per reported rep,
+> median 3.6, **zero files with zero anchors** — the threshold transferred untuned.
+>
+> **Integration is set-wide, not per-rep.** Step 3 says "within each rep only," which is not
+> yet possible: rep boundaries do not exist until Phase 2. `zupt_integrate()` instead
+> integrates continuously across the set and subtracts a piecewise-linear drift curve fit
+> through *all* anchors (`np.interp`, held flat beyond the outer anchors). This yields the
+> same bounded-horizon property — drift is pinned at every anchor, ~1–3 s apart — without
+> needing segmentation. Revisit when Phase 2 lands only if per-rep integration measurably
+> improves on it; the set-wide form is strictly more general.
+>
+> **The bounded quantity is per-anchor-segment, not whole-set.** When validating
+> displacement, measure excursion *between adjacent anchors*. Whole-file `max − min`
+> additionally accumulates residual inter-anchor drift and will look alarming while the
+> pipeline is healthy. On the Kaggle corpus: whole-file median 2.32 m vs per-segment median
+> 0.192 m (p90 0.49 m, max 0.53 m — real curl/press/row ROMs). The signature that confirms
+> correct behaviour is `corr(whole-file, duration) = +0.38` against
+> `corr(per-segment, duration) = −0.01`: error grows with recording length, the bounded
+> horizon does not. This is the §5.5 claim — absolute displacement carries bias, rep-to-rep
+> comparison stays valid — measured on real data.
+
 ### 5.6 Quality gates
 
 Reject or flag a set if:
@@ -275,6 +344,20 @@ Reject or flag a set if:
 - Total set duration is implausible for the rep count
 
 Flagged sets are excluded from model training but still shown to the user with a confidence caveat.
+
+> **Implementation note (Phase 1).** Three of the four gates are live: `sample_gaps`,
+> `insufficient_stationary` (`n_stationary < reported_reps`), and `no_stationary_anchors`
+> (`n_stationary == 0`, checked independently of `reported_reps` — which is absent whenever
+> a set arrives without trusted metadata, as all real-data files do). The remaining two
+> gates — detected rep count vs `reported_reps`, and implausible duration-for-rep-count —
+> require segmentation and land in Phase 2.
+>
+> **Touch-and-go detection (§5.5) is deliberately not implemented.** Gyro-led ZUPT recovers
+> a near-zero-velocity anchor at each reversal whether or not the lifter dwells, so accuracy
+> degrades gracefully rather than failing; and the current synthetic generator models smooth
+> reversals only, so the flag **could not be validated even if written**. An unvalidatable
+> flag is worse than no flag — it reads as coverage. Revisit when the generator models sharp
+> (non-zero-velocity) reversals, or when real touch-and-go data is labelled.
 
 ---
 
@@ -699,6 +782,26 @@ Milestone 3 is the gate. If segmentation fails, nothing downstream is meaningful
 **Integration drift.** ZUPT bounds it but does not eliminate it. Absolute displacement carries bias; only rep-to-rep comparison within a set is trustworthy. Touch-and-go reps degrade this further.
 
 **Watch shift.** If the device moves on the strap mid-set, path features change for a non-physiological reason. No current mitigation — consider a sudden orientation-offset detector as a flag.
+
+**Horizontal plane is unresolved (§5.3).** Per-set yaw alignment is deferred, so `a_horiz` /
+`v_horiz` / `disp_horiz` are in an arbitrary-yaw frame, are not comparable across sets, and
+carry no accuracy test. Vertical-axis results are unaffected. This blocks path-consistency
+features (§6.2) and must be closed in Phase 3.
+
+**Source-convention drift across capture sources (§5.2).** Real corpora are not internally
+consistent. The Kaggle CoreMotion set mixes g and m/s² units *and* gravity sign within a
+single directory, and neither defect raises an error — a unit error becomes a sign error
+after normalization, and a sign error yields self-consistent but polarity-inverted vertical
+motion. Ingest must measure `‖gravity‖` and gravity sign per file rather than trust a
+source-wide assumption. Any sign-keyed feature (tempo phase split, eccentric/concentric
+duration) inherits this risk; magnitude-only features do not.
+
+**§5.1 resampling is validated only against synthetic data.** The Kaggle corpus was
+pre-resampled before publication — exactly 100 Hz, `dt` min = max = 0.01000, zero gaps
+> 50 ms across all 164 files. It therefore exercises §5.2–5.6 but says *nothing* about the
+jitter/gap handling §5.1 exists for. The synthetic generator's irregular-delivery model
+remains the stronger test of that stage. Cleaning that happened upstream of publication is
+invisible in the file, so real data can look like a harder test than it is.
 
 **Baseline contamination.** If early reps are already poor, deviation-based features under-report. Mitigated but not solved by warmup-referenced and cross-session baselines.
 
