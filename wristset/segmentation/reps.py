@@ -27,11 +27,21 @@ import numpy as np
 from scipy.signal import find_peaks
 
 from wristset.conditioning import ConditionedSet
+from wristset.segmentation.activity import ActiveWindow, detect_active_window
 
 __all__ = ["RepBoundary", "SegmentationResult", "segment_reps", "RECOVERY_THRESHOLD"]
 
 #: Fraction of descent depth a rep must recover to count as completed (vs failed attempt).
 RECOVERY_THRESHOLD: float = 0.6
+
+#: Physiological rep-period band (§3.3: rep fundamental 0.3-1 Hz). The autocorrelation
+#: estimate is confined here; anything outside is an envelope artifact, not a rep cadence.
+MIN_PERIOD_S: float = 0.3
+MAX_PERIOD_S: float = 10.0
+
+#: Max ratio between the autocorrelation and inter-bottom period estimates before the
+#: local (inter-bottom) estimate is preferred. 2.0 tolerates half/double-period lock-on.
+PERIOD_AGREEMENT: float = 2.0
 
 #: Concentric-first exercises invert the eccentric/concentric phase order (§6.1).
 _CONCENTRIC_FIRST = {"deadlift"}
@@ -57,7 +67,14 @@ class RepBoundary:
 class SegmentationResult:
     reps: list[RepBoundary] = field(default_factory=list)
     period_s: float | None = None
-    method: str = "velocity_zero_crossing"
+    method: str = "displacement_minima"
+    active_window: "ActiveWindow | None" = None  # §6.1 set-detection validation signal
+
+    @property
+    def active_fraction(self) -> float:
+        """Fraction of the recording that is active lifting. <1 means the recording
+        carried non-lifting time (setup/racking/rest) outside the working set."""
+        return 1.0 if self.active_window is None else self.active_window.active_fraction
 
     @property
     def n_completed(self) -> int:
@@ -69,7 +86,15 @@ class SegmentationResult:
 
 
 def _estimate_period_samples(disp: np.ndarray, fs: float) -> float | None:
-    """First prominent autocorrelation peak of the (detrended) displacement (§6.1)."""
+    """First prominent autocorrelation peak of the (detrended) displacement (§6.1).
+
+    Bounded to the physiological rep band. Autocorrelation is a *global* view, so on a
+    long recording containing rest or several sets it can lock onto the set-rest envelope
+    instead of the rep cadence — observed at 57-101 s on the real corpus against a ~4.5 s
+    median. An unbounded estimate is catastrophic downstream: ``min_dist = 0.5 * period``
+    then suppresses every rep but one. Returning None is strictly safer, since the caller
+    falls back to a fixed minimum spacing.
+    """
     x = disp - disp.mean()
     if np.allclose(x, 0):
         return None
@@ -77,14 +102,35 @@ def _estimate_period_samples(disp: np.ndarray, fs: float) -> float | None:
     if ac[0] <= 0:
         return None
     ac = ac / ac[0]
-    # ignore very short lags (< 0.3 s); a rep is ~1-4 s
-    lo = int(0.3 * fs)
-    if lo >= len(ac) - 2:
+    lo = int(MIN_PERIOD_S * fs)
+    hi = min(int(MAX_PERIOD_S * fs), len(ac) - 2)
+    if lo >= hi:
         return None
-    peaks, _ = find_peaks(ac[lo:], height=0.2)
+    # search only within the rep band, so an out-of-band envelope peak is never selected
+    peaks, _ = find_peaks(ac[lo : hi + 1], height=0.2)
     if peaks.size == 0:
         return None
     return float(peaks[0] + lo)
+
+
+def _refine_period(period: float | None, bottoms: np.ndarray, fs: float) -> float | None:
+    """Cross-check the autocorrelation period against observed inter-bottom spacing.
+
+    The two estimators fail independently: autocorrelation is global and frequency-domain
+    (fooled by set-rest envelopes), while inter-bottom spacing is local and time-domain
+    (fooled only by spurious peaks, and then boundedly). When they disagree by more than
+    ``PERIOD_AGREEMENT`` the local estimate is preferred — its failure mode is a modest
+    spacing error, whereas the global one's is total set suppression.
+    """
+    if bottoms.size < 3:
+        return period
+    observed = float(np.median(np.diff(bottoms)))
+    if observed <= 0:
+        return period
+    if period is None:
+        return observed if MIN_PERIOD_S * fs <= observed <= MAX_PERIOD_S * fs else None
+    ratio = max(period, observed) / min(period, observed)
+    return period if ratio <= PERIOD_AGREEMENT else observed
 
 
 def segment_reps(
@@ -93,6 +139,7 @@ def segment_reps(
     exercise: str = "bench_press",
     reached_failure: bool = False,
     expected_reps: int | None = None,
+    trim: bool = True,
 ) -> SegmentationResult:
     """Segment reps from a ConditionedSet.
 
@@ -102,29 +149,53 @@ def segment_reps(
     the recovery test alone lets a shallow failed attempt through under heavy fatigue.
     ``expected_reps`` is accepted for the DTW fallback trigger but never used to fabricate
     or force the count.
+
+    ``trim`` applies §6.1 set detection: segmentation is restricted to the detected active
+    window so setup/racking/rest motion outside the working set is not counted as reps. On
+    a clean capture the window is the whole recording and this is a no-op; the detected
+    ``active_fraction`` is then the §6.1 validation signal. Emitted indices and times
+    always refer to the FULL conditioned arrays, so downstream layers need no offset.
     """
     # disp_vert is already drift-corrected (high-passed) in conditioning, so rep minima
     # and the return-to-lockout recovery test are both stable references here.
-    disp = cs.disp_vert
-    t = cs.t
     fs = cs.fs
+    if cs.disp_vert.shape[0] < 3:
+        return SegmentationResult()
+
+    window = detect_active_window(cs) if trim else None
+    off = window.i0 if window else 0
+    disp = cs.disp_vert[off : window.i1 + 1] if window else cs.disp_vert
+    t = cs.t[off : window.i1 + 1] if window else cs.t
     n = disp.shape[0]
     if n < 3:
-        return SegmentationResult()
+        # active window too short to segment; fall back to the full recording
+        window, off = None, 0
+        disp, t, n = cs.disp_vert, cs.t, cs.disp_vert.shape[0]
 
     period = _estimate_period_samples(disp, fs)
 
     span = float(np.percentile(disp, 95) - np.percentile(disp, 5))
     if span <= 0:
-        return SegmentationResult(period_s=None)
+        return SegmentationResult(period_s=None, active_window=window)
 
-    min_dist = int(0.5 * period) if period else int(0.4 * fs)
     prominence = 0.2 * span
 
-    # rep bottoms = prominent minima of the (drift-free) vertical displacement
-    bottoms, _ = find_peaks(-disp, prominence=prominence, distance=max(min_dist, 1))
+    def _find_bottoms(p: float | None) -> np.ndarray:
+        min_dist = int(0.5 * p) if p else int(0.4 * fs)
+        # rep bottoms = prominent minima of the (drift-free) vertical displacement
+        found, _ = find_peaks(-disp, prominence=prominence, distance=max(min_dist, 1))
+        return found
+
+    # Two-pass: detect with the autocorrelation period, cross-check it against the
+    # spacing actually observed, and re-detect if the refined period disagrees (§6.1).
+    bottoms = _find_bottoms(period)
+    refined = _refine_period(period, bottoms, fs)
+    if refined is not None and (period is None or abs(refined - period) > 1e-6):
+        period = refined
+        bottoms = _find_bottoms(period)
+
     if bottoms.size == 0:
-        return SegmentationResult(period_s=_samples_to_s(period, fs))
+        return SegmentationResult(period_s=_samples_to_s(period, fs), active_window=window)
 
     reps: list[RepBoundary] = []
     concentric_first = exercise in _CONCENTRIC_FIRST
@@ -148,12 +219,13 @@ def segment_reps(
             t_start, t_end = t_end, t_start
             i_start, i_end = i_end, i_start
 
+        # emitted indices are re-based onto the FULL conditioned arrays (see docstring)
         reps.append(
             RepBoundary(
                 rep_index=k + 1,
-                i_start=int(i_start),
-                i_bottom=int(b),
-                i_end=int(i_end),
+                i_start=int(i_start) + off,
+                i_bottom=int(b) + off,
+                i_end=int(i_end) + off,
                 t_start=float(t_start),
                 t_bottom=float(t_bottom),
                 t_end=float(t_end),
@@ -179,7 +251,8 @@ def segment_reps(
     return SegmentationResult(
         reps=reps,
         period_s=_samples_to_s(period, fs),
-        method="velocity_zero_crossing",
+        method="displacement_minima",
+        active_window=window,
     )
 
 

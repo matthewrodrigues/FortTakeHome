@@ -6,6 +6,7 @@ exact-match rate of the detected completed-rep count against ``reported_reps`` โ
 weak supervision on every set (ยง6.1).
 """
 
+from wristset.segmentation.activity import ActiveWindow, detect_active_window
 from wristset.segmentation.dtw import (
     build_template,
     dtw_distance,
@@ -18,6 +19,8 @@ from wristset.segmentation.reps import (
 )
 
 __all__ = [
+    "ActiveWindow",
+    "detect_active_window",
     "RepBoundary",
     "SegmentationResult",
     "segment_reps",
