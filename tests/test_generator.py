@@ -66,3 +66,40 @@ def test_generate_session_shares_session_id():
     sets = generate_session([SetParams(seed=0), SetParams(seed=0, stop_rir=3, reached_failure=False)])
     assert len({g.session_id for g in sets}) == 1
     assert [g.set_index for g in sets] == [1, 2]
+
+
+def test_tremor_power_is_consistent_across_recordings():
+    """Emitted tremor must be measurable at a consistent LEVEL across recordings.
+
+    Regression (2026-08-20). Two compounding generator defects made the tremor feature vary
+    ~200x between otherwise-identical sets, for reasons with nothing to do with the lifter:
+
+    1. ``f_tremor`` was drawn from U(8, 12) — the CORNERS of the §5.4 analysis band, where a
+       4th-order Butterworth applied zero-phase retains only ~50% of amplitude (~25% of the
+       power) against ~100% at 9-11 Hz.
+    2. Gyro tremor was injected as a 3-vector with independent random per-axis gains. The
+       feature reads ``|gyro|``, so the contribution depended on how that vector happened to
+       align with the movement axis — measured, a ~120x swing.
+
+    This propagated all the way into the §8.3 stability subscore, where a set taken to
+    failure scored a perfect 100 because its tremor never appeared to rise.
+    """
+    from wristset.conditioning import condition_set
+
+    powers = []
+    for seed in range(1, 9):
+        g = generate_set(SetParams(capacity=10, stop_rir=2, reached_failure=False,
+                                   seed=seed, tremor_growth=2.5))
+        cs = condition_set(g.raw, reported_reps=g.reported_reps)
+        powers.append(float(np.mean(cs.tremor**2)))
+
+    lo, hi = min(powers), max(powers)
+    assert lo > 0, "tremor vanished entirely"
+    assert hi / lo < 3.0, f"tremor level swings {hi / lo:.0f}x across recordings: {powers}"
+
+
+def test_tremor_frequency_sits_inside_the_analysis_band():
+    """The drawn tremor frequency must stay in the band-pass's flat interior, not its
+    roll-off corners — the root cause of the level swing above."""
+    lo, hi = SetParams().tremor_f_range_hz
+    assert 8.0 < lo < hi < 12.0, f"tremor range {(lo, hi)} touches the band corners"

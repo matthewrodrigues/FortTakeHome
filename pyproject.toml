@@ -34,6 +34,10 @@ dev = [
     "pytest>=8.0",
 ]
 
+[project.scripts]
+# Phase 5 core demo: synthetic session -> form subscores + execution narrative.
+wristset-demo = "wristset.demo:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

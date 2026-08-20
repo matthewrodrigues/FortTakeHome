@@ -21,9 +21,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - import-safety guard
         "The annotation UI needs the 'ui' extra. Install with: uv sync --extra ui"
     ) from exc
 
-from wristset.conditioning import condition_set
-from wristset.features import KEY_CHANNELS, extract_set_features
-from wristset.segmentation import segment_reps
+from wristset.demo import SetAnalysis, analyze_set
+from wristset.features import KEY_CHANNELS
 from wristset.synth import SetParams, generate_set
 
 
@@ -56,8 +55,9 @@ def main() -> None:
         seed = st.number_input("Seed", 0, 9999, 1, step=1)
 
     g = _synthetic(int(seed), exercise, capacity, failure, degraded)
-    cs = condition_set(g.raw, reported_reps=g.reported_reps)
-    res = segment_reps(cs, exercise=exercise, reached_failure=g.reached_failure)
+    # Single source for the raw -> form-score wiring, shared with the CLI demo.
+    analysis = analyze_set(g)
+    cs, res = analysis.cs, analysis.result
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Reported reps", g.reported_reps)
@@ -114,17 +114,43 @@ def main() -> None:
         f"{[round(r.rom_true_m, 3) for r in g.reps if r.completed]}"
     )
 
-    _features_view(cs, res, g)
+    _scoring_view(analysis)
+    _features_view(analysis)
 
 
-def _features_view(cs, res, g) -> None:
+def _scoring_view(a: SetAnalysis) -> None:
+    """§8.3-8.4 form-score panel (Phase 5). Form half only — the effort half (RIR/RPE) and
+    the composite arrive in Phase 8, so this never fabricates a composite (§8.7)."""
+    if not a.result.reps:
+        return
+    fs = a.form
+    st.divider()
+    st.subheader("Layer 5a · form subscores (§8.3)")
+
+    score = fs.form_score
+    head = "—" if score is None else f"{round(score)} / 100"
+    tag = " · provisional" if fs.provisional else ""
+    st.metric("Form score (effort half pending)", head)
+    if fs.provisional:
+        st.caption("Provisional — no personal history; §8.4 fixed-scale normalization" + tag)
+
+    for s in fs.subscores:
+        if s.score is None:
+            st.write(f"**{s.name}** · n/a (no reference)")
+            continue
+        st.write(f"**{s.name}** · {round(s.score)}")
+        st.progress(min(max(s.score / 100.0, 0.0), 1.0))
+
+    st.markdown("**Execution narrative (§8.6)**")
+    st.info(a.narrative)
+
+
+def _features_view(a: SetAnalysis) -> None:
     """§6.2-6.3 feature panel — the Phase 3 gate's visual sanity check (milestone 4)."""
+    cs, res, g = a.cs, a.result, a.meta
     if not res.reps:
         return
-
-    sf = extract_set_features(
-        cs, res.reps, exercise=g.exercise, load_kg=g.load_kg, set_type=g.set_type
-    )
+    sf = a.features
 
     st.divider()
     st.subheader("Layer 4 · per-rep features (§6.2)")

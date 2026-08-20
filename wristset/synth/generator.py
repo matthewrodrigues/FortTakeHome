@@ -67,6 +67,16 @@ class SetParams:
     # --- tremor / smoothness ---
     tremor_gain: float = 0.35  # base 8-12 Hz accel amplitude (m/s^2)
     tremor_growth: float = 2.5  # multiplier on tremor by end of set
+    #: Frequency range the tremor sinusoid is drawn from. Deliberately the INTERIOR of the
+    #: §5.4 8-12 Hz analysis band, not its endpoints: a 4th-order Butterworth band-pass
+    #: applied zero-phase (``sosfiltfilt``) retains only ~50% of amplitude AT the corner
+    #: frequencies — i.e. ~25% of the power — against ~100% at 9-11 Hz (measured). Real
+    #: physiological tremor spans the band, but the generator's job is to be measurable,
+    #: not to exercise the filter's roll-off.
+    #:
+    #: Secondary in practice: with the gyro-axis fix below in place, drawing from the full
+    #: U(8,12) leaves only a ~1.2x level swing. This range removes that residue.
+    tremor_f_range_hz: tuple[float, float] = (9.0, 11.0)
 
     # --- user calibration (RPE) ---
     rpe_bias: float = 0.0  # reported - mechanical; negative = under-reports effort
@@ -350,8 +360,9 @@ def generate_set(
 
     a_world = np.stack([d2(x_fine), d2(y_fine), d2(z_fine)], axis=1)
 
-    # tremor: 8-12 Hz, amplitude grows with fatigue
-    f_tremor = rng.uniform(8.0, 12.0)
+    # Tremor: physiological 8-12 Hz, amplitude grows with fatigue. The frequency is drawn
+    # from the band's FLAT INTERIOR, not its endpoints — see TREMOR_F_RANGE_HZ.
+    f_tremor = rng.uniform(*params.tremor_f_range_hz)
     tremor_amp = params.tremor_gain * (1.0 + params.tremor_growth * env)
     tremor = (tremor_amp * np.sin(2 * np.pi * f_tremor * t_fine))[:, None]
     a_world = a_world + tremor * rng.uniform(0.6, 1.0, size=(1, 3))
@@ -377,7 +388,17 @@ def generate_set(
     gyro_axis = rng.standard_normal(3)
     gyro_axis /= np.linalg.norm(gyro_axis)
     gyro_dev = omega_mag[:, None] * gyro_axis[None, :]
-    gyro_dev = gyro_dev + 0.3 * tremor * rng.uniform(0.6, 1.0, size=(1, 3))
+    # Tremor into the gyro. Injected ALONG the movement axis rather than as an
+    # independently-scaled 3-vector: the tremor feature reads |gyro|, and a scalar tremor
+    # broadcast onto three axes with random per-axis gains contributes to that magnitude
+    # only in proportion to how it happens to align with the movement vector. Measured, the
+    # same tremor amplitude moved |gyro| by anywhere from 0.008 to 0.970 across draws.
+    #
+    # This was the DOMINANT cause of the ~200x tremor-level swing across recordings: with
+    # the frequency range fixed but this line left as-is, the swing is still ~298x; with
+    # this line fixed the swing is ~1.2x even drawing frequency from the full U(8,12).
+    # Projecting onto the movement axis makes the contribution deterministic in amplitude.
+    gyro_dev = gyro_dev + 0.3 * tremor * gyro_axis[None, :]
     gyro_dev = gyro_dev + rng.normal(0.0, params.noise_gyro, size=gyro_dev.shape)
 
     # 5. resample onto jittered / gapped sensor timestamps

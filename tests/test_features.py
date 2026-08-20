@@ -257,14 +257,13 @@ def test_feature_stability_across_repeat_recordings():
     spread genuine fatigue produces within a set — otherwise a trend claim built on it is
     measuring noise. Compared as a ratio so it is scale-free per channel.
     """
-    # LEVEL-stable channels only. tremor_power_8_12 is deliberately excluded: the
-    # generator draws f_tremor ~ U(8,12) per set and the 8-12 Hz band-pass rolls off hard
-    # at the band edges, so absolute tremor level varies ~1000x across recordings (2e-5 to
-    # 1.4e-2 measured) for physical reasons unrelated to the lifter. Its *trend* is stable
-    # and is gated by test_trajectory_summaries_stable_across_repeats below — which is the
-    # property §6.2 actually claims for it ("motor unit recruitment shift proxy", a change
-    # indicator, and §8.3's level-vs-change split puts it on the change side).
-    channels = ("conc_mean_vel", "rom_vertical", "ecc_duration")
+    # tremor_power_8_12 was excluded here until 2026-08-20: the generator drew f_tremor
+    # from U(8,12) — the band-pass CORNERS, where zero-phase filtering retains only ~50% of
+    # amplitude — and injected gyro tremor as a randomly-scaled 3-vector whose contribution
+    # to |gyro| depended on its alignment with the movement axis. Together those swung
+    # absolute tremor level ~200x across recordings for reasons unrelated to the lifter.
+    # Both are fixed in the generator, and tremor now clears this gate with a wide margin.
+    channels = ("conc_mean_vel", "rom_vertical", "ecc_duration", "tremor_power_8_12")
     # repeat "recordings": same movement, different sensor-noise draw
     repeats = [_features(seed=s, capacity=10, stop_rir=2)[1] for s in (11, 12, 13, 14, 15)]
 

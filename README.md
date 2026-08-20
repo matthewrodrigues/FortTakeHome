@@ -27,11 +27,19 @@ wristset/
   features/      # Layers 4 & 7 (Phase 3) — per-rep features, trajectories, baselines
   models/rir/    # Layer 5b (Phase 6)
   models/rpe/    # Layer 5c (Phase 7)
-  scoring/       # Layer 5a (Phase 8)
+  scoring/       # Layer 5a form subscores (Phase 4); effort half + composite (Phase 8)
   divergence/    # Layer 6  (Phase 8)
-  insights/      # narratives (Phase 8)
+  insights/      # execution narrative (Phase 5); effort narrative (Phase 8)
+  demo.py        # Phase 5: wires raw -> form subscores + narrative (CLI + UI orchestrator)
   ui/            # Streamlit annotation + demo (Phase 2+)
   eval/          # metric harness (Phase 9)
+```
+
+## Demo (Phase 5)
+
+```bash
+uv run python -m wristset.demo --seed 1   # deterministic: synthetic session -> form scores
+uv run --extra ui streamlit run wristset/ui/app.py   # interactive
 ```
 
 ## Setup
