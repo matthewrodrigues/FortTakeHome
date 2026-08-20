@@ -24,8 +24,7 @@ wristset/
   storage/       # Layer 1: Parquet + SQLite stores
   conditioning/  # Layer 2  (Phase 1)
   segmentation/  # Layer 3  (Phase 2)
-  features/      # Layer 4  (Phase 3)
-  baseline/      # Layer 7  (Phase 3)
+  features/      # Layers 4 & 7 (Phase 3) — per-rep features, trajectories, baselines
   models/rir/    # Layer 5b (Phase 6)
   models/rpe/    # Layer 5c (Phase 7)
   scoring/       # Layer 5a (Phase 8)

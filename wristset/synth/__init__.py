@@ -10,6 +10,8 @@ from wristset.synth.generator import (
     SetParams,
     generate_session,
     generate_set,
+    generate_training_session,
 )
 
-__all__ = ["SetParams", "GeneratedSet", "generate_set", "generate_session"]
+__all__ = ["SetParams", "GeneratedSet", "generate_set", "generate_session",
+           "generate_training_session"]

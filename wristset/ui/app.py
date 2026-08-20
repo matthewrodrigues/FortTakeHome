@@ -22,6 +22,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - import-safety guard
     ) from exc
 
 from wristset.conditioning import condition_set
+from wristset.features import KEY_CHANNELS, extract_set_features
 from wristset.segmentation import segment_reps
 from wristset.synth import SetParams, generate_set
 
@@ -111,6 +112,91 @@ def main() -> None:
         f"Ground truth: failure_rep={g.ground_truth.failure_rep}, "
         f"true ROMs (completed) = "
         f"{[round(r.rom_true_m, 3) for r in g.reps if r.completed]}"
+    )
+
+    _features_view(cs, res, g)
+
+
+def _features_view(cs, res, g) -> None:
+    """§6.2-6.3 feature panel — the Phase 3 gate's visual sanity check (milestone 4)."""
+    if not res.reps:
+        return
+
+    sf = extract_set_features(
+        cs, res.reps, exercise=g.exercise, load_kg=g.load_kg, set_type=g.set_type
+    )
+
+    st.divider()
+    st.subheader("Layer 4 · per-rep features (§6.2)")
+    b = sf.baseline
+    st.caption(
+        f"Baseline: **{b.source}** (n={b.n_reps} reps, "
+        f"{'reliable' if b.is_reliable else 'provisional — §7.1 early-set fallback'})"
+    )
+
+    st.dataframe(
+        [
+            {
+                "rep": r.rep_index,
+                "done": r.completed,
+                "conc_vel": round(r.conc_mean_vel, 3),
+                "peak_vel": round(r.conc_peak_vel, 3),
+                "ecc_vel": round(r.ecc_mean_vel, 3),
+                "rom_m": round(r.rom_vertical, 3),
+                "ecc_s": round(r.ecc_duration, 2),
+                "conc_s": round(r.conc_duration, 2),
+                "tempo": round(r.tempo_ratio, 2),
+                "pause_s": round(r.bottom_pause, 2),
+                "path_eff": round(r.path_efficiency, 2),
+                "horiz_m": round(r.horiz_excursion, 3),
+                # None when the ascent has no interior slowdown (§6.2 sticking point)
+                "stick_pos": round(r.min_vel_position, 2) if r.min_vel_position is not None else None,
+                "stick_vel": round(r.min_vel_value, 3) if r.min_vel_value is not None else None,
+                "tremor": f"{r.tremor_power_8_12:.2e}",
+                "sparc": round(r.spectral_arc_length, 2),
+                "dtw_base": round(r.path_dtw_baseline, 4) if r.path_dtw_baseline else None,
+            }
+            for r in sf.reps
+        ],
+        use_container_width=True,
+    )
+
+    # Degradation trajectories — each channel on its own normalized axis, since they carry
+    # different units. Normalizing to rep 1 shows SHAPE, which is what §6.3 summarises.
+    st.subheader("Degradation trajectories (§6.3)")
+    tfig = go.Figure()
+    for ch in ("conc_mean_vel", "rom_vertical", "ecc_duration", "tremor_power_8_12"):
+        series = np.array([getattr(r, ch) for r in sf.reps], dtype=float)
+        if series.size == 0 or not np.isfinite(series).all() or abs(series[0]) < 1e-12:
+            continue
+        tfig.add_trace(go.Scatter(
+            x=[r.rep_index for r in sf.reps], y=series / series[0],
+            mode="lines+markers", name=ch,
+        ))
+    tfig.update_layout(
+        height=320, hovermode="x unified",
+        xaxis=dict(title="rep index"),
+        yaxis=dict(title="value relative to rep 1"),
+        legend=dict(orientation="h"),
+    )
+    st.plotly_chart(tfig, use_container_width=True)
+
+    st.subheader("Set-level summaries (§6.3, retrospective)")
+    rows = []
+    for ch in KEY_CHANNELS:
+        rows.append({
+            "channel": ch,
+            **{
+                name: (round(v, 4) if isinstance(v, float) else v)
+                for name in ("slope", "curvature", "total_change", "max_dev",
+                             "breakpoint", "breakpoint_gain")
+                for v in [sf.retrospective.get(f"retro_{ch}_{name}")]
+            },
+        })
+    st.dataframe(rows, use_container_width=True)
+    st.caption(
+        "Causal summaries (reps 1..r) are computed separately for the RIR head and are "
+        "never mixed with these retrospective values — §6.3 leakage boundary."
     )
 
 

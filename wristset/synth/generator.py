@@ -33,7 +33,8 @@ from wristset.contract.schema import RepTruth
 G = 9.80665  # gravitational acceleration magnitude (m/s^2)
 _FINE_HZ = 1000  # continuous-signal grid before resampling to the sensor timestamps
 
-__all__ = ["SetParams", "GeneratedSet", "generate_set", "generate_session"]
+__all__ = ["SetParams", "GeneratedSet", "generate_set", "generate_session",
+           "generate_training_session"]
 
 
 @dataclass(frozen=True)
@@ -476,6 +477,63 @@ def _to_monotonic_ns(t_samples: np.ndarray) -> np.ndarray:
 
 def _round_half(x: float) -> float:
     return round(x * 2) / 2
+
+
+def generate_training_session(
+    *,
+    exercise: str = "bench_press",
+    rom_m: float | None = None,
+    working_load_kg: float = 80.0,
+    n_warmup: int = 2,
+    n_working: int = 3,
+    capacity: int = 10,
+    user_id: str = "user_synth",
+    session_id: str | None = None,
+    date: str = "2026-08-18",
+    seed: int = 0,
+    **set_kw,
+) -> list[GeneratedSet]:
+    """Generate a realistic session: warmup sets then working sets (§7.1).
+
+    The baseline hierarchy needs *structure*, not just more sets. Warmups are modelled as
+    genuinely cleaner — lower load, well short of failure, minimal ROM collapse and tremor
+    growth — because §7.1 tier 2 treats them as the reference for "this user's clean form".
+    If warmups were emitted identically to working sets, tier 2 would be indistinguishable
+    from tier 3 (early-set) and the hierarchy could not be validated.
+
+    Working sets accumulate fatigue across the session: later sets reach failure sooner and
+    degrade harder, which is what makes cross-set baselines meaningful.
+    """
+    rom_m = rom_m if rom_m is not None else (0.55 if exercise == "back_squat" else 0.45)
+    session_id = session_id or uuid.uuid4().hex[:12]
+    params: list[SetParams] = []
+
+    for i in range(n_warmup):
+        # ramping load, low fatigue, clean form — the §7.1 tier-2 reference
+        frac = 0.5 + 0.15 * i
+        params.append(SetParams(
+            exercise=exercise, rom_m=rom_m, set_type="warmup",
+            load_kg=round(working_load_kg * frac, 1),
+            capacity=capacity, stop_rir=max(capacity - 5, 1), reached_failure=False,
+            vel_decay=0.10, rom_collapse=0.02, tremor_growth=1.2,
+            seed=seed + 100 + i, **set_kw,
+        ))
+
+    for i in range(n_working):
+        # inter-set fatigue: later working sets degrade harder and stop closer to failure
+        f = i / max(n_working - 1, 1)
+        params.append(SetParams(
+            exercise=exercise, rom_m=rom_m, set_type="working",
+            load_kg=working_load_kg,
+            capacity=max(capacity - i, 4),
+            stop_rir=0 if i == n_working - 1 else max(2 - i, 0),
+            reached_failure=(i == n_working - 1),
+            vel_decay=0.30 + 0.15 * f, rom_collapse=0.10 + 0.10 * f,
+            tremor_growth=2.0 + 1.0 * f,
+            seed=seed + 200 + i, **set_kw,
+        ))
+
+    return generate_session(params, user_id=user_id, session_id=session_id, date=date)
 
 
 def generate_session(
