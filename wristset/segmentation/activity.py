@@ -4,6 +4,17 @@
 For the prototype, the user explicitly starts/stops the set, so this is a validation
 check rather than a detection problem."
 
+**Energy alone is insufficient, and measurably so.** §6.1's energy threshold separates
+active from *rest*, but the real boundary problem is active-lifting versus active
+*non-lifting* — setup, unracking, walking, racking. Measured on a ragged-edge synthetic
+set, rolling-RMS energy is 1.48-1.60 in the edges against 1.97 during lifting, and
+displacement std is identical to two decimal places. No threshold separates those.
+
+What does separate them is **rhythmicity**: lifting produces regularly-spaced vertical
+minima (inter-bottom gaps of 2.06-2.46 s in the same set) while edge motion does not
+(1.38, 2.50, 3.53 s). So the energy pass is retained as a coarse activity mask, and the
+window is selected by finding the longest *rhythmic* run of candidate rep bottoms.
+
 Both roles are served here. When capture supplies clean boundaries the detected window
 spans essentially the whole recording and trimming is a no-op — the useful output is then
 the *validation* signal ``active_fraction``. When a recording carries ragged edges (setup,
@@ -24,6 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.signal import find_peaks
 
 from wristset.conditioning import ConditionedSet
 
@@ -47,10 +59,30 @@ BRIDGE_GAP_S: float = 6.0
 #: An active run shorter than this cannot be a working set; discarded as incidental motion.
 MIN_ACTIVE_S: float = 5.0
 
-#: Refuse to trim below this fraction of the recording. Trimming away most of a recording
-#: on energy evidence alone loses reps outright; keeping too much only risks a mild
-#: over-count that downstream tests already filter. Asymmetric costs, asymmetric guard.
+#: Refuse to trim below this fraction of the recording on ENERGY evidence alone. Trimming
+#: away most of a recording on that basis loses reps outright; keeping too much only risks
+#: a mild over-count that downstream tests already filter. A rhythmic-run window is exempt
+#: because periodicity is direct positive evidence of lifting, not an absence of motion.
 MIN_KEEP_FRACTION: float = 0.5
+
+#: Max fractional deviation from the local median spacing for a gap to count as rhythmic.
+#: Real lifting cadence drifts with fatigue (concentric slows), so this must tolerate
+#: genuine tempo change while rejecting the irregular spacing of non-lifting motion.
+RHYTHM_TOLERANCE: float = 0.45
+
+#: Minimum consecutive rhythmic intervals required to accept a run as a working set.
+#: Three intervals (four bottoms) is the shortest span where "regular" is meaningful.
+MIN_RHYTHMIC_INTERVALS: int = 3
+
+#: Above this coverage the rhythmic window is treated as "the whole recording" and no trim
+#: is applied. Prevents trimming a clean capture, where reps that legitimately break rhythm
+#: (a fatigue-slowed last rep, a failed attempt) sit just outside the rhythmic core.
+TRIM_EVIDENCE_FRACTION: float = 0.85
+
+#: Rhythmic runs separated by less than this many cadence-units are one set with a missed
+#: detection between them, not two sets. A dropped bottom leaves ~2x cadence; genuine rest
+#: between sets spans far more. 3.5 sits between those two scales.
+MERGE_GAP_CADENCES: float = 3.5
 
 #: Padding added to each end of the detected window. The first and last reps END in a top
 #: lockout, which is by definition low-energy, so the energy threshold marks the last
@@ -100,6 +132,22 @@ def detect_active_window(cs: ConditionedSet) -> ActiveWindow:
     if n < 3:
         return full
 
+    # Primary: rhythmicity. Positive evidence of lifting, and the only signal that
+    # separates the working set from equally-energetic non-lifting motion.
+    rhythmic = _rhythmic_run(cs)
+    if rhythmic is not None:
+        i0, i1 = rhythmic
+        frac = (i1 - i0 + 1) / n
+        return ActiveWindow(
+            i0=int(i0),
+            i1=int(i1),
+            t0=float(cs.t[i0]),
+            t1=float(cs.t[i1]),
+            active_fraction=float(frac),
+            n_candidate_runs=1,
+        )
+
+    # Fallback: §6.1 energy threshold, for sets with too few reps to establish a rhythm.
     energy = _rolling_rms(np.linalg.norm(cs.a_world, axis=1), int(ENERGY_WINDOW_S * fs))
 
     # Relative threshold: interpolate between the set's own quiet floor and active level.
@@ -143,6 +191,83 @@ def detect_active_window(cs: ConditionedSet) -> ActiveWindow:
         active_fraction=float(frac),
         n_candidate_runs=len(long_runs),
     )
+
+
+def _rhythmic_run(cs: ConditionedSet) -> tuple[int, int] | None:
+    """Longest run of regularly-spaced vertical-displacement minima (the working set).
+
+    Lifting is rhythmic; setup, racking and walking are not. Candidate bottoms are found
+    with the same prominence rule the segmenter uses, then the longest consecutive run
+    whose spacings agree with the run's own median is taken as the set. Returns inclusive
+    sample bounds, or None when no run is long enough to be conclusive.
+    """
+    d = cs.disp_vert
+    fs = cs.fs
+    span = float(np.percentile(d, 95) - np.percentile(d, 5))
+    if span <= 0:
+        return None
+    bottoms, _ = find_peaks(-d, prominence=0.2 * span, distance=max(int(0.4 * fs), 1))
+    if bottoms.size < MIN_RHYTHMIC_INTERVALS + 1:
+        return None
+
+    gaps = np.diff(bottoms).astype(float)
+    # Reference cadence is the GLOBAL median gap: within one set the rep cadence is stable
+    # (it drifts with fatigue but does not jump), and the set supplies most bottoms, so the
+    # median is dominated by real reps. Scoring against a per-window median instead lets a
+    # single outlier gap drag the reference and cut the run short.
+    cadence = float(np.median(gaps))
+    if cadence <= 0:
+        return None
+    rhythmic = np.abs(gaps - cadence) / cadence <= RHYTHM_TOLERANCE
+
+    # Collect every consecutive run of rhythmic gaps.
+    runs: list[tuple[int, int]] = []
+    start = None
+    for k in range(rhythmic.size + 1):
+        if k < rhythmic.size and rhythmic[k]:
+            if start is None:
+                start = k
+        elif start is not None:
+            if (k - start) >= MIN_RHYTHMIC_INTERVALS:
+                runs.append((start, k))
+            start = None
+    if not runs:
+        return None
+
+    # Merge runs that belong to the SAME set. Taking only the longest run fragments a
+    # continuous set: measured on the real corpus, bottoms discarded that way were
+    # themselves 44-100% rhythmic at the same cadence — i.e. real reps, not noise. The
+    # discriminator is gap magnitude, not the tolerance test: a single missed detection
+    # leaves a gap of ~2x cadence (the lifter never stopped), whereas rest between sets
+    # spans many cadence-units. Runs separated by less than MERGE_GAP_CADENCES are
+    # therefore one set with a detection dropout in the middle.
+    merged: list[tuple[int, int]] = [runs[0]]
+    for s, e in runs[1:]:
+        ps, pe = merged[-1]
+        if (bottoms[s] - bottoms[pe]) <= MERGE_GAP_CADENCES * cadence:
+            merged[-1] = (ps, e)
+        else:
+            merged.append((s, e))
+
+    # widest merged span wins (most reps explained by one consistent cadence)
+    si, ei = max(merged, key=lambda r: bottoms[r[1]] - bottoms[r[0]])
+    best = (int(bottoms[si]), int(bottoms[ei]))
+
+    # Extend generously past the rhythmic core. The run covers only the *regularly spaced*
+    # bottoms, but a set legitimately ends with reps that break rhythm — a fatigue-slowed
+    # final rep, or a failed attempt whose stall is by definition arrhythmic. Extending by
+    # a full cadence each way keeps those; the alternative discards real reps, which is the
+    # costlier error (see MIN_KEEP_FRACTION).
+    pad = int(cadence)
+    i0 = max(0, best[0] - pad)
+    i1 = min(d.shape[0] - 1, best[1] + pad)
+
+    # Only trim on positive evidence that non-lifting material exists to remove. When the
+    # rhythmic window already covers essentially the whole recording, the capture was clean
+    # and trimming can only do harm.
+    if (i1 - i0 + 1) / d.shape[0] >= TRIM_EVIDENCE_FRACTION:
+        return None
+    return i0, i1
 
 
 def _contiguous_runs(mask: np.ndarray) -> list[tuple[int, int]]:

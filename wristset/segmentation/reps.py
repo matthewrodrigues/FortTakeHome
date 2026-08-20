@@ -6,8 +6,10 @@ Three-stage approach, cheapest first (§6.1):
        by vertical-velocity sign changes. Handles the majority of clean sets.
     2. Autocorrelation period estimate to set a minimum inter-bottom spacing, rejecting
        spurious double-detections.
-    3. DTW template matching (see ``dtw.py``) as a fallback for degraded late reps where
-       velocity zero-crossings get noisy.
+    3. DTW template matching (see ``dtw.py``): stages 1-2 are shape-blind — they accept
+       any prominent, correctly-spaced minimum, including non-lifting motion that lands on
+       cadence. A template built from this set's own early reps encodes what a rep looks
+       like, so excursions far from it are rejected.
 
 A detected bottom is a *completed* rep only if the movement recovers back near the top
 baseline afterwards; a failed final attempt descends but stalls partway (§4.2) and is
@@ -21,7 +23,7 @@ first); the per-exercise seam is present but only bench/squat are active (§1.3)
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from scipy.signal import find_peaks
@@ -42,6 +44,26 @@ MAX_PERIOD_S: float = 10.0
 #: Max ratio between the autocorrelation and inter-bottom period estimates before the
 #: local (inter-bottom) estimate is preferred. 2.0 tolerates half/double-period lock-on.
 PERIOD_AGREEMENT: float = 2.0
+
+#: DTW stage-3 rejection threshold, as a multiple of the set's own median template
+#: distance. Relative, not absolute: template distance scales with how variable a given
+#: lifter's reps are, so a fixed cut would be strict for a consistent lifter and useless
+#: for a variable one.
+#:
+#: Set to 6.0 as a deliberately CONSERVATIVE outlier guard, not a discriminator. Measured
+#: (2026-08-19): in the degraded ("hard") regime 20.8% of *genuine* completed reps exceed
+#: ratio 3.0, because heavy fatigue legitimately deforms rep shape — that is the signal the
+#: product exists to measure, so rejecting on it fights the system's purpose. At 3.0 the
+#: hard-regime gate collapsed 83.3% -> 38.3%. Meanwhile spurious detections that survive
+#: set-detection trimming have a *median* ratio of 1.34 and none exceed 6.0: after trimming
+#: they are shape-indistinguishable from real reps. No threshold separates the two, so this
+#: only removes gross outliers and leaves the gate unchanged (verified identical to
+#: disabling the stage). See §14 for the standing limitation.
+DTW_REJECT_RATIO: float = 6.0
+
+#: Minimum detected reps before DTW rejection runs. Below this the template is built from
+#: too few clean reps to be a trustworthy reference, and could reject genuine reps.
+DTW_MIN_REPS: int = 5
 
 #: Concentric-first exercises invert the eccentric/concentric phase order (§6.1).
 _CONCENTRIC_FIRST = {"deadlift"}
@@ -235,6 +257,18 @@ def segment_reps(
             )
         )
 
+    # §6.1 stage 3: DTW template rejection. Stages 1-2 are shape-blind — they accept any
+    # prominent, correctly-spaced minimum, including non-lifting motion that happens to
+    # land on cadence. A template built from this set's own early reps encodes what a rep
+    # LOOKS like, so an excursion far from it is not a rep. Runs before failed-attempt
+    # reconciliation because removing spurious excursions changes which rep is weakest.
+    method = "displacement_minima"
+    if len(reps) >= DTW_MIN_REPS:
+        before = len(reps)
+        reps = _reject_by_template(cs, reps)
+        if len(reps) != before:
+            method = "displacement_minima+dtw"
+
     # Failed-attempt reconciliation (§3.5, §4.2). A failed attempt always ends the set.
     # If the user reported reaching failure but every detected excursion passed the
     # recovery test, the shallow failed attempt slipped through under heavy fatigue —
@@ -251,9 +285,47 @@ def segment_reps(
     return SegmentationResult(
         reps=reps,
         period_s=_samples_to_s(period, fs),
-        method="displacement_minima",
+        method=method,
         active_window=window,
     )
+
+
+def _reject_by_template(cs: ConditionedSet, reps: list[RepBoundary]) -> list[RepBoundary]:
+    """§6.1 stage 3 — drop excursions whose velocity profile is unlike this set's reps.
+
+    The template comes from the set's own first completed reps (low fatigue, §7), and the
+    rejection threshold is relative to the set's *median* template distance, so it adapts
+    to how consistent this particular lifter is. Only clearly aberrant excursions are
+    removed: a failed attempt is legitimately template-unlike and is preserved by keeping
+    every rep already marked ``completed=False``.
+    """
+    # imported here to keep the module-level import graph acyclic (dtw imports RepBoundary)
+    from wristset.segmentation.dtw import build_template, template_distance
+
+    template = build_template(cs, reps)
+    if template is None:
+        return reps
+
+    dists = [template_distance(cs, r, template) for r in reps]
+    finite = [d for d in dists if np.isfinite(d)]
+    if not finite:
+        return reps
+    median = float(np.median(finite))
+    if median <= 0:
+        return reps
+
+    limit = DTW_REJECT_RATIO * median
+    kept = [
+        r
+        for r, d in zip(reps, dists)
+        # keep incomplete reps regardless: a failed attempt SHOULD be template-unlike
+        if (not r.completed) or (not np.isfinite(d)) or d <= limit
+    ]
+    if len(kept) < DTW_MIN_REPS:
+        return reps  # rejected too much to be trustworthy; keep the original detection
+
+    # rep_index is positional and must stay contiguous after removals
+    return [replace(r, rep_index=i + 1) for i, r in enumerate(kept)]
 
 
 def _samples_to_s(samples: float | None, fs: float) -> float | None:

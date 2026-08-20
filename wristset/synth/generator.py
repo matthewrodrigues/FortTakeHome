@@ -71,6 +71,17 @@ class SetParams:
     rpe_bias: float = 0.0  # reported - mechanical; negative = under-reports effort
     rpe_noise: float = 0.3
 
+    # --- recording edges (§6.1 set detection) ---
+    # Real captures are rarely trimmed to the working set: the recording starts while the
+    # lifter is still setting up and ends after racking. That motion is large and SLOW
+    # (~0.2-0.4 Hz, below the 0.3-1 Hz rep band) — energetic enough to pass an energy
+    # threshold but not rhythmic at rep cadence. Defaults are 0.0 so every existing set
+    # and gate is unchanged; opt in to exercise set detection.
+    lead_s: float = 0.0  # non-lifting motion before the first rep
+    tail_s: float = 0.0  # non-lifting motion after the last rep
+    edge_motion_m: float = 0.25  # amplitude of that motion (m, vertical)
+    edge_hz: float = 0.3  # its dominant frequency (Hz)
+
     # --- sensor model ---
     sample_hz: int = 100
     jitter: float = 0.15  # timestamp jitter as fraction of nominal dt
@@ -156,8 +167,30 @@ def _euler_to_quat(rx: float, ry: float, rz: float) -> np.ndarray:
     return np.array([w, x, y, z], dtype=np.float64)
 
 
+def _edge_motion(dur_s: float, p: SetParams, rng: np.random.Generator) -> np.ndarray:
+    """Non-lifting motion for a recording edge (§6.1): setup, unracking, walking, racking.
+
+    Deliberately OUT of the rep band — a couple of slow components near ``edge_hz`` plus a
+    wander term. It must be energetic (so an energy threshold cannot trivially reject it)
+    while not rhythmic at rep cadence (so it is not a legitimate rep). Tapered at the join
+    so the trajectory stays continuous into the set.
+    """
+    n = max(int(round(dur_s * _FINE_HZ)), 2)
+    t = np.arange(n) / _FINE_HZ
+    z = np.zeros(n)
+    for k in (1.0, 1.7):  # incommensurate -> no clean periodicity
+        z += (p.edge_motion_m / k) * np.sin(2 * np.pi * p.edge_hz * k * t + rng.uniform(0, 2 * np.pi))
+    z += p.edge_motion_m * 0.4 * np.sin(2 * np.pi * 0.07 * t + rng.uniform(0, 2 * np.pi))
+    return z
+
+
 def _build_rep_segments(p: SetParams) -> tuple[np.ndarray, list[RepTruth], int | None]:
-    """Return (z_fine, rep_truths, failure_rep). z on the _FINE_HZ grid, t=0 at start."""
+    """Return (z_fine, rep_truths, failure_rep). z on the _FINE_HZ grid, t=0 at start.
+
+    When ``lead_s``/``tail_s`` are set, the rep block is wrapped in non-lifting motion and
+    every rep truth time is shifted by the lead duration so ground truth continues to
+    address the emitted trajectory (§6.1).
+    """
     dt = 1.0 / _FINE_HZ
     completed = p.capacity - p.stop_rir  # completed reps before stopping
     n_denom = max(p.capacity - 1, 1)
@@ -236,6 +269,31 @@ def _build_rep_segments(p: SetParams) -> tuple[np.ndarray, list[RepTruth], int |
         failure_rep = completed + 1  # 1-based attempt index
 
     z_fine = np.concatenate(z_chunks)
+
+    if p.lead_s > 0 or p.tail_s > 0:
+        # Edge motion is generated from a dedicated stream so adding edges does not
+        # perturb the rep trajectory drawn for this seed (a set with lead_s>0 has the
+        # same reps as the same seed without it).
+        edge_rng = np.random.default_rng(p.seed + 9973)
+        parts = []
+        if p.lead_s > 0:
+            lead = _edge_motion(p.lead_s, p, edge_rng)
+            parts.append(lead - lead[-1])  # join continuously at z=0 (top position)
+        parts.append(z_fine)
+        if p.tail_s > 0:
+            tail = _edge_motion(p.tail_s, p, edge_rng)
+            parts.append(tail - tail[0] + z_fine[-1])
+        z_fine = np.concatenate(parts)
+
+        # shift rep truth times past the prepended lead (ground truth must stay aligned)
+        if p.lead_s > 0:
+            shift = (max(int(round(p.lead_s * _FINE_HZ)), 2)) / _FINE_HZ
+            reps = [
+                replace(r, t_start=r.t_start + shift, t_bottom=r.t_bottom + shift,
+                        t_end=r.t_end + shift)
+                for r in reps
+            ]
+
     return z_fine, reps, failure_rep
 
 

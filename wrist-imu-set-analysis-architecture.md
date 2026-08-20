@@ -783,6 +783,19 @@ Milestone 3 is the gate. If segmentation fails, nothing downstream is meaningful
 
 **Watch shift.** If the device moves on the strap mid-set, path features change for a non-physiological reason. No current mitigation — consider a sudden orientation-offset detector as a flag.
 
+**DTW template matching cannot discriminate reps (§6.1 stage 3).** Wired in as a
+conservative outlier guard, but measurement (2026-08-19) shows it cannot do the job §6.1
+assigns it. Two findings, both from synthetic ground truth: (1) in the degraded regime
+20.8% of *genuine* completed reps exceed 3× the set's median template distance, because
+fatigue legitimately deforms rep shape — cutting on that fights the exact signal the
+product measures, and collapsed the hard-regime gate 83.3% → 38.3%; (2) spurious
+detections that survive set-detection trimming have a *median* distance ratio of 1.34 and
+none exceed 6.0 — after trimming they are shape-indistinguishable from real reps. The two
+distributions overlap in the wrong direction, so no threshold separates them. The stage is
+retained at a conservative 6.0 (verified identical to disabling it) for gross outliers
+only. Rep-shape similarity is the wrong axis; the discriminating signal is rhythmicity
+(§6.1 set detection), not shape.
+
 **Horizontal plane is unresolved (§5.3).** Per-set yaw alignment is deferred, so `a_horiz` /
 `v_horiz` / `disp_horiz` are in an arbitrary-yaw frame, are not comparable across sets, and
 carry no accuracy test. Vertical-axis results are unaffected. This blocks path-consistency
