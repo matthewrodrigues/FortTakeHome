@@ -1,3 +1,5 @@
+
+
 """Baseline management (§7) — Layer 7.
 
 Every comparison-based feature needs a reference for "this user's clean form on this

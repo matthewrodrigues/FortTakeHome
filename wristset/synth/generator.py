@@ -34,7 +34,7 @@ G = 9.80665  # gravitational acceleration magnitude (m/s^2)
 _FINE_HZ = 1000  # continuous-signal grid before resampling to the sensor timestamps
 
 __all__ = ["SetParams", "GeneratedSet", "generate_set", "generate_session",
-           "generate_training_session"]
+           "generate_training_session", "generate_population"]
 
 
 @dataclass(frozen=True)
@@ -555,6 +555,66 @@ def generate_training_session(
         ))
 
     return generate_session(params, user_id=user_id, session_id=session_id, date=date)
+
+
+def generate_population(
+    *,
+    n_users: int = 12,
+    sets_per_user: int = 8,
+    exercises: tuple[str, ...] = ("bench_press", "back_squat"),
+    failure_fraction: float = 0.5,
+    seed: int = 0,
+) -> list[GeneratedSet]:
+    """A multi-user corpus for fitting and evaluating the RIR head (§9.5).
+
+    The hazard at high-fatigue rep states is identified only from sets that reached those
+    states, so failure sets are the binding constraint — ``failure_fraction`` of every
+    user's sets are taken to failure (``stop_rir=0``), the rest censored at ``stop_rir∈1..4``.
+    Each virtual user carries stable latent traits — ``capacity`` (strength), working load,
+    and an ``rpe_bias`` (planted for the Phase-7 RPE head, unused here) — so a by-user split
+    (§9.6) measures generalization to *new lifters*, not just new sets.
+
+    Fully seeded: identical ``seed`` reproduces identical users, sets, and labels.
+    """
+    rng = np.random.default_rng(seed)
+    out: list[GeneratedSet] = []
+
+    for u in range(n_users):
+        user_id = f"user_{u:03d}"
+        # latent per-user traits, stable across the user's sets
+        base_capacity = int(rng.integers(6, 13))
+        load_kg = float(_round_half(rng.uniform(40.0, 120.0)))
+        rpe_bias = float(rng.normal(0.0, 1.0))
+        # per-user fatigue character, so users are not interchangeable
+        vel_decay = float(rng.uniform(0.30, 0.55))
+        rom_collapse = float(rng.uniform(0.10, 0.28))
+        tremor_growth = float(rng.uniform(2.0, 3.5))
+        exercise = exercises[u % len(exercises)]
+
+        for s in range(sets_per_user):
+            reach_failure = rng.random() < failure_fraction
+            # capacity wobbles set to set around the user's base (daily readiness)
+            capacity = max(int(base_capacity + rng.integers(-1, 2)), 5)
+            stop_rir = 0 if reach_failure else int(rng.integers(1, 5))
+            stop_rir = min(stop_rir, capacity - 1)  # SetParams requires stop_rir < capacity
+            params = SetParams(
+                exercise=exercise,
+                rom_m=0.55 if exercise == "back_squat" else 0.45,
+                load_kg=load_kg,
+                capacity=capacity,
+                stop_rir=stop_rir,
+                reached_failure=(stop_rir == 0 and reach_failure),
+                vel_decay=vel_decay,
+                rom_collapse=rom_collapse,
+                tremor_growth=tremor_growth,
+                rpe_bias=rpe_bias,
+                seed=int(rng.integers(0, 2**31)),
+            )
+            out.append(generate_set(
+                params, user_id=user_id,
+                session_id=f"{user_id}:sess", date="2026-08-20", set_index=s + 1,
+            ))
+    return out
 
 
 def generate_session(
