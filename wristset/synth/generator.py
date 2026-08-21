@@ -34,7 +34,8 @@ G = 9.80665  # gravitational acceleration magnitude (m/s^2)
 _FINE_HZ = 1000  # continuous-signal grid before resampling to the sensor timestamps
 
 __all__ = ["SetParams", "GeneratedSet", "generate_set", "generate_session",
-           "generate_training_session", "generate_population"]
+           "generate_training_session", "generate_population",
+           "generate_rpe_population"]
 
 
 @dataclass(frozen=True)
@@ -563,16 +564,25 @@ def generate_population(
     sets_per_user: int = 8,
     exercises: tuple[str, ...] = ("bench_press", "back_squat"),
     failure_fraction: float = 0.5,
+    max_stop_rir: int = 4,
     seed: int = 0,
 ) -> list[GeneratedSet]:
     """A multi-user corpus for fitting and evaluating the RIR head (§9.5).
 
     The hazard at high-fatigue rep states is identified only from sets that reached those
     states, so failure sets are the binding constraint — ``failure_fraction`` of every
-    user's sets are taken to failure (``stop_rir=0``), the rest censored at ``stop_rir∈1..4``.
-    Each virtual user carries stable latent traits — ``capacity`` (strength), working load,
-    and an ``rpe_bias`` (planted for the Phase-7 RPE head, unused here) — so a by-user split
-    (§9.6) measures generalization to *new lifters*, not just new sets.
+    user's sets are taken to failure (``stop_rir=0``), the rest censored at
+    ``stop_rir ∈ 1..max_stop_rir``. Each virtual user carries stable latent traits —
+    ``capacity`` (strength), working load, and an ``rpe_bias`` — so a by-user split (§9.6)
+    measures generalization to *new lifters*, not just new sets.
+
+    **RPE label balance.** The generator sets ``reported_rpe = clip(10 - stop_rir, 6, 10)
+    + rpe_bias + noise``, so ``stop_rir`` alone determines where a set lands on the RPE
+    scale. At the RIR-oriented defaults (half the sets at ``stop_rir=0``) RPE 10 is both the
+    modal outcome *and* a clip ceiling that absorbs every positive bias, which piles ~1/3 of
+    a corpus onto one level and makes RPE accuracy easy to overstate. Lower
+    ``failure_fraction`` and/or raise ``max_stop_rir`` to spread the labels — see
+    :func:`generate_rpe_population` for a preset aimed at the RPE head.
 
     Fully seeded: identical ``seed`` reproduces identical users, sets, and labels.
     """
@@ -595,7 +605,7 @@ def generate_population(
             reach_failure = rng.random() < failure_fraction
             # capacity wobbles set to set around the user's base (daily readiness)
             capacity = max(int(base_capacity + rng.integers(-1, 2)), 5)
-            stop_rir = 0 if reach_failure else int(rng.integers(1, 5))
+            stop_rir = 0 if reach_failure else int(rng.integers(1, max_stop_rir + 1))
             stop_rir = min(stop_rir, capacity - 1)  # SetParams requires stop_rir < capacity
             params = SetParams(
                 exercise=exercise,
@@ -615,6 +625,39 @@ def generate_population(
                 session_id=f"{user_id}:sess", date="2026-08-20", set_index=s + 1,
             ))
     return out
+
+
+def generate_rpe_population(
+    *,
+    n_users: int = 24,
+    sets_per_user: int = 6,
+    exercises: tuple[str, ...] = ("bench_press", "back_squat"),
+    seed: int = 0,
+) -> list[GeneratedSet]:
+    """A corpus balanced across the RPE scale, for evaluating the §10 ordinal head.
+
+    :func:`generate_population`'s defaults are tuned for the RIR head, which needs many
+    sets taken to failure. That choice concentrates the RPE labels: ``reported_rpe`` is
+    driven by ``10 - stop_rir``, so half the sets land at 10 before bias, and the clip at 10
+    absorbs every positive ``rpe_bias`` on top. Measured on the default corpus, 35 of 102
+    training sets were RPE 10 and only 2 were RPE 8.
+
+    A skewed corpus flatters accuracy: predicting the majority level alone scored 0.54
+    within +/-1 RPE. This preset drops ``failure_fraction`` to 0.2 and widens ``stop_rir``
+    to 1..4, spreading the mechanical RPE across 6-10 so accuracy has to be earned across
+    the scale rather than on one dominant level.
+
+    Same generator, same latent-trait machinery, same determinism — only the stopping-point
+    mix differs.
+    """
+    return generate_population(
+        n_users=n_users,
+        sets_per_user=sets_per_user,
+        exercises=exercises,
+        failure_fraction=0.2,
+        max_stop_rir=4,
+        seed=seed,
+    )
 
 
 def generate_session(

@@ -6,6 +6,13 @@ half (RIR/RPE proximity), the composite weighting, the divergence flag, and narr
 assembly (§8.1-8.2, 8.5-8.6) arrive in Phase 8.
 """
 
+from wristset.scoring.composite import (
+    DIVERGENCE_THRESHOLD,
+    RIR_GATE_NOTE,
+    CompositeScore,
+    proximity_score,
+    score_composite,
+)
 from wristset.scoring.form import (
     MIN_REPS_BEYOND_REFERENCE,
     NormRef,
@@ -18,6 +25,11 @@ from wristset.scoring.form import (
 )
 
 __all__ = [
+    "CompositeScore",
+    "score_composite",
+    "proximity_score",
+    "DIVERGENCE_THRESHOLD",
+    "RIR_GATE_NOTE",
     "squash",
     "MIN_REPS_BEYOND_REFERENCE",
     "score_form",

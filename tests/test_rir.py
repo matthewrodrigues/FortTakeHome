@@ -17,6 +17,8 @@ from wristset.models.rir import (
 )
 from wristset.synth import SetParams, generate_population, generate_set
 
+from conftest import cached_population
+
 
 def _prep_one(**kw):
     g = generate_set(SetParams(**kw))
@@ -51,7 +53,7 @@ def test_censored_set_contributes_all_zero_rows():
 def test_design_matrix_carries_no_retrospective_columns():
     """The Phase-3 leakage boundary, enforced for the head that most needs it (§9.2):
     only causal / per-rep features may reach the hazard model."""
-    labeled = prepare_sets(generate_population(n_users=2, sets_per_user=2, seed=0))
+    labeled = cached_population(n_users=2, sets_per_user=2, seed=0)
     pp = build_person_period(labeled)
     assert not any("retro" in c for c in pp.columns), pp.columns
     # and the expected causal drivers ARE present
@@ -72,7 +74,7 @@ from wristset.models.rir import HazardModel  # noqa: E402
 
 
 def _fit_small():
-    labeled = prepare_sets(generate_population(n_users=8, sets_per_user=6, seed=7))
+    labeled = cached_population(n_users=8, sets_per_user=6, seed=7)
     pp = build_person_period(labeled)
     return HazardModel.fit(pp), pp
 
@@ -204,7 +206,7 @@ def test_fit_objective_matches_the_censored_likelihood_on_real_rows():
 
 # --- §D hazard -> RIR distribution ----------------------------------------------
 
-from wristset.models.rir import rir_distribution  # noqa: E402
+from wristset.models.rir import CONFIDENT_HORIZON, rir_distribution  # noqa: E402
 
 
 def test_rir_distribution_is_a_valid_pmf():
@@ -216,6 +218,87 @@ def test_rir_distribution_is_a_valid_pmf():
     assert pred.dist.shape == (9,)
     assert abs(pred.dist.sum() - 1.0) < 1e-9
     assert np.all(pred.dist >= 0.0)
+
+
+def _held_out_predictions(corpus_seed: int):
+    """(|error|, is_confident, predictive_std) for every completed rep of held-out
+    failure sets — the population every uncertainty claim below is measured on."""
+    corpus = cached_population(n_users=24, sets_per_user=6, seed=corpus_seed)
+    train, test = by_user_split(corpus, frac_test=0.3, seed=0)
+    model = HazardModel.fit(build_person_period(train))
+    out = []
+    for sf, meta in test:
+        if not (meta.reached_failure and sf.reps):
+            continue
+        last = max(x.rep_index for x in sf.reps)
+        for x in sf.reps:
+            if not x.completed:
+                continue
+            p = rir_distribution(model, sf, x.rep_index,
+                                 exercise=meta.exercise, user_id=meta.user_id)
+            out.append((abs(p.expected_rir - (last - x.rep_index)),
+                        p.is_confident, p.predictive_std))
+    return out
+
+
+def test_predictive_std_is_a_valid_spread():
+    model, _ = _fit_small()
+    labeled = _prep_one(capacity=9, stop_rir=0, reached_failure=True, seed=11)
+    sf, meta = labeled[0]
+    r = sf.reps[len(sf.reps) // 2].rep_index
+    pred = rir_distribution(model, sf, r, exercise=meta.exercise, K=8)
+    assert pred.predictive_std >= 0.0
+    # a degenerate (point-mass) distribution has zero spread
+    pred.dist = np.zeros_like(pred.dist)
+    pred.dist[3] = 1.0
+    pred.expected_rir = 3.0
+    assert pred.predictive_std == pytest.approx(0.0, abs=1e-9)
+
+
+def test_predictive_std_must_not_be_used_as_a_confidence_gate():
+    """Pins the measured defect that motivates :attr:`is_confident` (§8.2).
+
+    The PMF's own spread is overconfident and anti-informative: gating on "std below the
+    median" selects predictions that are *worse* on average. If a future change makes the
+    distribution genuinely calibrated this test will fail — at which point the std becomes
+    usable and the horizon gate can be revisited.
+    """
+    rows = [r for seed in (5, 11, 23) for r in _held_out_predictions(seed)]
+    err = np.array([e for e, _, _ in rows])
+    sd = np.array([s for _, _, s in rows])
+    # dramatically overconfident: typical spread far below typical error
+    assert np.median(sd) < 0.5 * np.median(err)
+    # and a std-based gate does not separate accurate from inaccurate predictions
+    narrow = sd <= np.median(sd)
+    assert err[narrow].mean() >= err[~narrow].mean() - 0.05, (
+        "predictive_std now separates error — revisit the horizon gate"
+    )
+
+
+def test_horizon_flag_is_directionally_correct():
+    """The advisory horizon flag must at least point the right way.
+
+    §8.2's real confidence gate is DEFERRED (no calibrated uncertainty estimate exists —
+    see RIRPrediction.is_confident). This asserts only that the advisory annotation is not
+    inverted the way ``predictive_std`` is; the separation it achieves is small by
+    construction and is not relied on downstream.
+    """
+    rows = [r for seed in (5, 11, 23) for r in _held_out_predictions(seed)]
+    err = np.array([e for e, _, _ in rows])
+    conf = np.array([c for _, c, _ in rows], dtype=bool)
+    assert conf.any() and (~conf).any(), "gate must not be all-or-nothing"
+    assert err[conf].mean() < err[~conf].mean(), (
+        f"confident {err[conf].mean():.2f} vs gated {err[~conf].mean():.2f}"
+    )
+
+
+def test_confidence_gate_follows_the_horizon_threshold():
+    model, _ = _fit_small()
+    labeled = _prep_one(capacity=10, stop_rir=0, reached_failure=True, seed=12)
+    sf, meta = labeled[0]
+    for x in sf.reps:
+        p = rir_distribution(model, sf, x.rep_index, exercise=meta.exercise)
+        assert p.is_confident == (p.expected_rir <= CONFIDENT_HORIZON)
 
 
 def test_expected_rir_falls_as_the_set_progresses():
@@ -250,7 +333,7 @@ def _fit_and_eval(corpus_seed: int):
     (``last_rep - r``). Censored sets have no observable RIR, which is the whole reason
     §9.1 uses a hazard formulation.
     """
-    corpus = prepare_sets(generate_population(n_users=24, sets_per_user=6, seed=corpus_seed))
+    corpus = cached_population(n_users=24, sets_per_user=6, seed=corpus_seed)
     train, test = by_user_split(corpus, frac_test=0.3, seed=0)
     model = HazardModel.fit(build_person_period(train))
     test_pp = build_person_period(test)
@@ -296,7 +379,7 @@ def test_collinearity_report_flags_uninterpretable_coefficients():
     expected to conflict, and forcing them would trade predictive accuracy for
     interpretability the model does not need.
     """
-    corpus = prepare_sets(generate_population(n_users=24, sets_per_user=6, seed=5))
+    corpus = cached_population(n_users=24, sets_per_user=6, seed=5)
     train, _ = by_user_split(corpus, frac_test=0.3, seed=0)
     pp = build_person_period(train)
     model = HazardModel.fit(pp)
@@ -322,7 +405,7 @@ def test_collinear_feature_recovers_its_sign_when_fitted_alone():
     """Direct evidence that the sign conflicts are a parameterization artifact: a feature
     whose joint coefficient is negative fits positive once its correlated partners are
     removed from the design."""
-    corpus = prepare_sets(generate_population(n_users=24, sets_per_user=6, seed=5))
+    corpus = cached_population(n_users=24, sets_per_user=6, seed=5)
     train, _ = by_user_split(corpus, frac_test=0.3, seed=0)
     cols = list(build_person_period(train).columns)
 

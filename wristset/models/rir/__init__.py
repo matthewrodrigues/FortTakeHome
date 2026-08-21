@@ -24,7 +24,17 @@ from wristset.models.rir.eval import (
     completed_rep_c_index,
 )
 from wristset.models.rir.hazard import HazardModel
-from wristset.models.rir.rir import RIRPrediction, rir_distribution
+from wristset.models.rir.readiness import (
+    MIN_FAILURE_SETS,
+    TARGET_FAILURE_SETS,
+    RirReadiness,
+    assess_rir_readiness,
+)
+from wristset.models.rir.rir import (
+    CONFIDENT_HORIZON,
+    RIRPrediction,
+    rir_distribution,
+)
 
 __all__ = [
     "PersonPeriod",
@@ -33,8 +43,13 @@ __all__ = [
     "feature_row",
     "prepare_sets",
     "HazardModel",
+    "RirReadiness",
+    "assess_rir_readiness",
+    "MIN_FAILURE_SETS",
+    "TARGET_FAILURE_SETS",
     "RIRPrediction",
     "rir_distribution",
+    "CONFIDENT_HORIZON",
     "by_user_split",
     "c_index",
     "completed_rep_c_index",

@@ -6,6 +6,7 @@ narrative (RIR/RPE) arrives in Phase 8. Kept import-light (no streamlit/plotly) 
 demo depends only on core packages.
 """
 
+from wristset.insights.effort import effort_narrative, rir_range
 from wristset.insights.execution import execution_narrative
 
-__all__ = ["execution_narrative"]
+__all__ = ["execution_narrative", "effort_narrative", "rir_range"]
