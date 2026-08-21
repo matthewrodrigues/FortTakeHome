@@ -5,8 +5,7 @@ analysis: deterministic **form subscores**, an estimated **RIR** (reps-in-reserv
 a hierarchical **RPE** head, and the **divergence** between reported and mechanically-estimated
 exertion.
 
-See `wrist-imu-set-analysis-architecture.md` for the full system architecture, and
-`~/.claude/plans/hey-claude-can-you-lovely-dongarra.md` for the phased development plan.
+See `wrist-imu-set-analysis-architecture.md` for the full system architecture.
 
 ## Status
 
