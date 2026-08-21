@@ -13,7 +13,8 @@ from __future__ import annotations
 
 __all__ = [
     "CORE_TERMS", "REP_TABLE", "FEATURE_TABLE", "SUBSCORES", "CHART_GUIDE",
-    "SCORE_GUIDE", "WHAT_THIS_IS", "definition_list", "as_markdown_table",
+    "SCORE_GUIDE", "QUALITY_GUIDE", "WHAT_THIS_IS", "definition_list",
+    "as_markdown_table",
 ]
 
 
@@ -170,23 +171,54 @@ SUBSCORES: dict[str, str] = {
 CHART_GUIDE: str = """
 **How to read this chart**
 
-- **Cyan line - vertical displacement (m).** How high the wrist is. **Troughs are the
-  bottom of each rep** (weight at its lowest); **peaks are the top**, where the lifter
-  locks out. One peak-trough-peak cycle is one rep, so you can count reps by counting
-  troughs.
-- **Blue line - vertical velocity (m/s).** How fast the wrist is moving. It crosses zero
-  at every peak and trough, because the weight has to stop to change direction. Positive =
-  moving up, negative = moving down. **Watch the peaks flatten across the set** - that is
-  fatigue slowing the lift down.
-- **Grey X markers - ZUPT anchors.** Moments the app detected the wrist was momentarily
-  still. Working out position from an accelerometer accumulates error fast, so the app
-  pins velocity back to zero at these known-still points to keep the blue line honest.
-  (ZUPT = Zero-velocity UPdaTe.)
+- **"Height (m)" line.** How high the wrist is. **Troughs are the bottom of each rep**
+  (weight at its lowest); **peaks are the top**, where the lifter locks out. One
+  peak-trough-peak cycle is one rep, so you can count reps by counting troughs.
+- **"Speed (m/s)" line** (right-hand axis). How fast the wrist is moving vertically. It
+  crosses zero at every peak and trough, because the weight has to stop to change
+  direction. Positive = moving up, negative = moving down. **Watch the peaks flatten
+  across the set** - that is fatigue slowing the lift down.
+- **"Still moments" (grey X markers).** Moments the app detected the wrist was momentarily
+  still - the top lockout and the bottom pause of each rep. Working out position from an
+  accelerometer accumulates error fast, so the app pins velocity back to zero at these
+  known-still points to keep the height line honest. (Called ZUPT anchors in the code, for
+  Zero-velocity UPdaTe.)
 - **Green / red shading - detected reps.** Green is a completed rep, red is a failed
   attempt. The dotted line inside each is that rep's lowest point.
 
 **The check to make:** if the shaded blocks line up with the troughs, rep detection worked.
 If they do not, every number further down the page is built on a bad count.
+""".strip()
+
+
+#: What the "Quality" indicator at the top of the page means.
+QUALITY_GUIDE: str = """
+**What "Quality" is checking**
+
+This is a check on the **incoming sensor data**, not on the analysis. It asks one question:
+did the watch deliver a clean enough signal to work with? It runs before reps are detected
+and before any score is computed.
+
+Three things can flag a set:
+
+- **`sample_gaps`** - the watch dropped samples somewhere, leaving a hole longer than
+  50 milliseconds. The app fills such holes by interpolating, which produces
+  plausible-looking data that was never actually measured, so it flags them instead of
+  hiding them. Detected on the original timestamps, before the signal is resampled - once
+  it has been resampled the gap is invisible.
+- **`no_stationary_anchors`** - the app never found a moment where the wrist was still.
+  This matters more than it sounds. Working out position from an accelerometer accumulates
+  error very fast, and the fix is to pin velocity back to zero at moments the wrist was
+  genuinely still (the grey X markers on the chart). With no such moments there is nothing
+  to pin to, so the displacement trace drifts and every distance-based number is
+  unreliable.
+- **`insufficient_stationary`** - fewer still moments than reps. A normal set pauses at
+  least once per rep, at the top or the bottom, so fewer means some reps were measured
+  across a longer uncorrected stretch.
+
+**"ok" does not mean the analysis is correct.** It means the input was clean. A set can
+have perfect signal quality and still have its reps miscounted - that is what the chart
+above is for.
 """.strip()
 
 

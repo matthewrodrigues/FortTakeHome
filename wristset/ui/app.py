@@ -101,19 +101,21 @@ def main() -> None:
     c1.metric("Reported reps", g.reported_reps)
     c2.metric("Detected completed", res.n_completed,
               delta=res.n_completed - g.reported_reps)
-    c3.metric("Quality", "low-confidence" if cs.low_confidence else "ok")
+    c3.metric("Signal quality", "low-confidence" if cs.low_confidence else "ok")
     if cs.quality.get("flags"):
         st.warning("Flags: " + ", ".join(cs.quality["flags"]))
+    with st.expander("What 'Signal quality' checks"):
+        st.markdown(gl.QUALITY_GUIDE)
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=cs.t, y=cs.disp_vert, name="vertical displacement (m)"))
-    fig.add_trace(go.Scatter(x=cs.t, y=cs.v_vert, name="vertical velocity (m/s)",
+    fig.add_trace(go.Scatter(x=cs.t, y=cs.disp_vert, name="Height (m)"))
+    fig.add_trace(go.Scatter(x=cs.t, y=cs.v_vert, name="Speed (m/s)",
                              yaxis="y2", line=dict(width=1)))
 
     # stationary anchors
     fig.add_trace(go.Scatter(
         x=cs.t[cs.anchor_idx], y=cs.disp_vert[cs.anchor_idx], mode="markers",
-        name="ZUPT anchors", marker=dict(color="gray", size=6, symbol="x")))
+        name="Still moments", marker=dict(color="gray", size=6, symbol="x")))
 
     # rep boundaries
     for r in res.reps:
@@ -123,10 +125,17 @@ def main() -> None:
         fig.add_vline(x=r.t_bottom, line=dict(color=color, width=1, dash="dot"))
 
     fig.update_layout(
-        height=520, hovermode="x unified",
-        yaxis=dict(title="displacement (m)"),
-        yaxis2=dict(title="velocity (m/s)", overlaying="y", side="right"),
-        legend=dict(orientation="h"),
+        height=560, hovermode="x unified",
+        yaxis=dict(title="height (m)"),
+        yaxis2=dict(title="speed (m/s)", overlaying="y", side="right"),
+        # Legend above the plot rather than inside it: horizontal entries were
+        # colliding. `itemwidth` sets a minimum px per entry, which is what
+        # actually forces the gap; `y=1.08` lifts it clear of the plot area.
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.08,
+            xanchor="left", x=0, itemwidth=90, tracegroupgap=30,
+        ),
+        margin=dict(t=90),
     )
     st.plotly_chart(fig, width="stretch")
     with st.expander("How to read this chart"):
@@ -310,10 +319,14 @@ def _features_view(a: SetAnalysis) -> None:
             mode="lines+markers", name=ch,
         ))
     tfig.update_layout(
-        height=320, hovermode="x unified",
+        height=360, hovermode="x unified",
         xaxis=dict(title="rep index"),
         yaxis=dict(title="value relative to rep 1"),
-        legend=dict(orientation="h"),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.08,
+            xanchor="left", x=0, itemwidth=90, tracegroupgap=30,
+        ),
+        margin=dict(t=90),
     )
     st.plotly_chart(tfig, width="stretch")
 
