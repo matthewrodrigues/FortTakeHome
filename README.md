@@ -96,7 +96,39 @@ doc for the full list.
   narratives, a history slider that exercises the readiness gate, and the §8.5 layout
   inversion.
 
-- **Phase 9 — integration, eval harness, demo polish.** Not yet built.
+- **Phase 9 — integration and eval harness.** `python -m wristset.eval` re-derives every
+  phase gate's headline number in one table, as shippable code rather than test-only
+  helpers, so the same figures can be quoted or regenerated after a change. Where a metric
+  has an honest and a flattering form it prints the honest one and says so: segmentation on
+  the operating distribution with the degraded regime shown *separately* rather than
+  averaged in; RIR discrimination as completed-rep concordance rather than the headline
+  C-index; RPE accuracy on the label-balanced corpus with its majority baseline alongside.
+
+  Running it surfaced one thing the phase gates had not: **`b_u` bias recovery is weaker on
+  a balanced corpus** (0.72 mean, 0.60-0.80 across seeds) than on the skewed one (0.84).
+  Recovering a per-user bias is easier when the mechanical reference barely moves; once RPE
+  spans 6-10 the model must fit the effort mapping and separate per-user bias at the same
+  time. Same pattern as the accuracy figure — the balanced number is the real one.
+
+  The demo also gained `--rpe-bias`, which plants a per-lifter reporting bias so the
+  divergence signal has a genuine mismatch to detect rather than an incidental one.
+
+  **Streamlit demo, written for a reader who did not build it.** Every abbreviation
+  (RIR, RPE, ROM, IMU, DTW, SPARC, ZUPT), every feature column, every subscore and every
+  chart element now has a plain-language definition, in collapsed expanders next to the
+  thing they explain rather than in a separate glossary nobody opens. The chart guide says
+  what the peaks and troughs actually are - troughs are the bottom of each rep, the
+  velocity line crosses zero at every direction change - and names the check to make: if
+  the shaded rep blocks line up with the troughs, detection worked; if not, every number
+  below is built on a bad count. Definitions live in `ui/glossary.py` so they can be
+  reviewed as prose, with tests asserting every acronym shown is expanded and that no spec
+  section reference leaks into user-facing text.
+
+  **Load time: ~9.7s to ~0.4s.** The only slow step is fitting the RIR head, which needs a
+  synthetic corpus generated and conditioned. That corpus is fully determined by
+  `(seed, n_users)` and the fit is convex from a zero init, so the fitted head (958 bytes)
+  is cached to disk and reused across app restarts - previously `st.cache_resource` only
+  helped within one running process.
 
 ### Deferred: confidence-gated RIR (§8.2)
 
@@ -149,7 +181,11 @@ wristset/
 uv run python -m wristset.demo --seed 1              # form + RPE composite (fast)
 uv run python -m wristset.demo --seed 1 --with-rir   # + fitted RIR head (~10s)
 uv run python -m wristset.demo --seed 1 --with-rir --rir-users 3   # RIR stays locked (§9.5)
+uv run python -m wristset.demo --seed 1 --with-rir --rpe-bias -2.5  # planted under-reporter
 uv run --extra ui streamlit run wristset/ui/app.py   # interactive
+
+uv run python -m wristset.eval            # every phase gate's number, one table
+uv run python -m wristset.eval --quick    # same, one corpus seed (~85s)
 ```
 
 ## Setup

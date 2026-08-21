@@ -1,10 +1,11 @@
-"""Streamlit annotation UI for debugging segmentation (§12).
+"""Streamlit demo + annotation UI (§12).
 
-Build the annotation UI early — it is used constantly to debug segmentation, and
-segmentation errors silently corrupt every downstream feature (§12). This view plots the
-conditioned vertical displacement / velocity with detected rep boundaries and stationary
-anchors overlaid, and reports detected-vs-reported rep counts (the primary segmentation
-metric, §6.1).
+Two audiences, one page. For a **reader coming cold**, every section carries plain-language
+exposition (see :mod:`wristset.ui.glossary`) explaining what the abbreviations mean, what
+the peaks and troughs on the chart are, and how to read each score. For **debugging**, the
+same page overlays detected rep boundaries and ZUPT anchors on the conditioned signal and
+shows detected-vs-reported rep counts — segmentation errors silently corrupt every
+downstream feature, so this view exists to catch them (§6.1, §12).
 
 Run:  ``streamlit run wristset/ui/app.py``  (requires the ``ui`` extra: ``uv sync --extra ui``)
 """
@@ -23,6 +24,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - import-safety guard
 
 from wristset.demo import SetAnalysis, analyze_set, fit_demo_rir_model
 from wristset.features import KEY_CHANNELS
+from wristset.ui import glossary as gl
 from wristset.synth import SetParams, generate_set
 
 
@@ -42,13 +44,20 @@ def _synthetic(seed: int, exercise: str, capacity: int, failure: bool, degraded:
     )
 
 
-@st.cache_resource(show_spinner="Fitting RIR head on synthetic history…")
+@st.cache_resource(show_spinner="Building training history (first run only)...")
 def _rir_head(seed: int, n_users: int):
     """Fit (and cache) the hazard head for the sidebar's history slider.
 
-    Streamlit reruns the whole script on every widget change, and building the corpus costs
-    seconds — so this is cached on ``(seed, n_users)``. Returns ``(model, readiness)``, with
-    ``model=None`` when §9.5's failure-set minimum is not met.
+    Two layers of caching, because this is the only slow step on the page:
+
+    * ``st.cache_resource`` keeps it out of Streamlit's per-widget reruns.
+    * ``fit_demo_rir_model`` additionally caches the fitted head to disk, so the ~9 s of
+      generating and conditioning the corpus is paid once *ever* rather than once per app
+      start. The corpus is fully determined by ``(seed, n_users)`` and the fit is convex,
+      so a cached head is byte-identical to a freshly fitted one.
+
+    Returns ``(model, readiness)``, with ``model=None`` when there is not yet enough
+    history to fit a trustworthy estimate.
     """
     if n_users <= 0:
         return None, None
@@ -56,23 +65,28 @@ def _rir_head(seed: int, n_users: int):
 
 
 def main() -> None:
-    st.set_page_config(page_title="wristset — segmentation", layout="wide")
-    st.title("wristset · rep segmentation debugger")
+    st.set_page_config(page_title="wristset", layout="wide")
+    st.title("wristset · what your wrist says about a set")
+    st.markdown(gl.WHAT_THIS_IS)
+    with st.expander("Glossary - the terms used on this page"):
+        st.markdown(gl.definition_list(gl.CORE_TERMS))
 
     with st.sidebar:
-        st.header("Synthetic set")
+        st.header("Simulate a set")
         exercise = st.selectbox("Exercise", ["bench_press", "back_squat"])
-        capacity = st.slider("Capacity (max reps)", 4, 14, 8)
-        failure = st.checkbox("Reached failure", value=True)
-        degraded = st.checkbox("Degraded (high fatigue)", value=False)
-        seed = st.number_input("Seed", 0, 9999, 1, step=1)
+        st.caption("These sliders change the simulated lift the app then analyses.")
+        capacity = st.slider("Max reps this lifter could do", 4, 14, 8)
+        failure = st.checkbox("Taken to failure", value=True)
+        degraded = st.checkbox("Heavy fatigue (form breaks down)", value=False)
+        seed = st.number_input("Random seed (changes the simulated lifter)", 0, 9999, 1, step=1)
 
-        st.header("RIR history (§9.5)")
+        st.header("Training history")
         st.caption(
-            "Reps-in-reserve unlocks once enough sets have been taken to failure. "
-            "Fewer lifters means fewer failure sets, so the estimate stays locked."
+            "The reps-in-reserve estimate is a learned model, so it only appears once "
+            "enough past sets taken to failure exist to fit it. Drag this down to see it "
+            "stay locked."
         )
-        rir_users = st.slider("Synthetic lifters of history", 0, 14, 10)
+        rir_users = st.slider("Simulated lifters of past data", 0, 14, 10)
 
     rir_model, readiness = _rir_head(int(seed), int(rir_users))
     if readiness is not None:
@@ -114,9 +128,15 @@ def main() -> None:
         yaxis2=dict(title="velocity (m/s)", overlaying="y", side="right"),
         legend=dict(orientation="h"),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
+    with st.expander("How to read this chart"):
+        st.markdown(gl.CHART_GUIDE)
 
     st.subheader("Detected reps")
+    st.caption(
+        "One row per rep the app found in the signal above. It was not told where the "
+        "reps were - it located them from the motion alone."
+    )
     st.dataframe(
         [
             {
@@ -130,10 +150,13 @@ def main() -> None:
             }
             for r in res.reps
         ],
-        use_container_width=True,
+        width="stretch",
     )
+    with st.expander("What these columns mean"):
+        st.markdown(gl.definition_list(gl.REP_TABLE))
     st.caption(
-        f"Ground truth: failure_rep={g.ground_truth.failure_rep}, "
+        f"Ground truth (simulator's correct answer): failure_rep="
+        f"{g.ground_truth.failure_rep}, "
         f"true ROMs (completed) = "
         f"{[round(r.rom_true_m, 3) for r in g.reps if r.completed]}"
     )
@@ -153,7 +176,9 @@ def _scoring_view(a: SetAnalysis) -> None:
         return
     fs, c = a.form, a.composite
     st.divider()
-    st.subheader("Layer 5a · set score (§8.1)")
+    st.subheader("Set score")
+    with st.expander("How the set score works"):
+        st.markdown(gl.SCORE_GUIDE)
 
     divergent = c is not None and c.divergent
 
@@ -181,9 +206,14 @@ def _scoring_view(a: SetAnalysis) -> None:
                 "the components present rather than filling in a default."
             )
         if c.provisional:
-            st.caption("Provisional — no personal history; §8.4 fixed-scale normalization.")
+            st.caption(
+                "Provisional: this lifter has no past data, so scores are scaled against "
+                "generic thresholds rather than their own history."
+            )
 
-    st.markdown("**Form subscores (§8.3)**")
+    st.markdown("**Form subscores** - four equal-weight views of how the movement held up")
+    with st.expander("What each subscore measures"):
+        st.markdown(gl.definition_list(gl.SUBSCORES))
     for s in fs.subscores:
         if s.score is None:
             st.write(f"**{s.name}** · n/a (no reference)")
@@ -198,14 +228,16 @@ def _scoring_view(a: SetAnalysis) -> None:
 def _narratives(a: SetAnalysis) -> None:
     """§8.6 effort + execution narratives, in that order (effort leads when present)."""
     if a.effort_text:
-        st.markdown("**Effort narrative (§8.6)**")
+        st.markdown("**How hard was it?**")
         st.info(a.effort_text)
         if a.divergence is not None and a.divergence.alert:
             st.caption(
-                f"Reported RPE sits at the {a.divergence.percentile:.0%} percentile of the "
-                f"mechanically-implied distribution (§11.3 alerts outside 10-90%)."
+                f"The reported effort sits at the {a.divergence.percentile:.0%} percentile "
+                f"of what the movement implied - i.e. only {a.divergence.percentile:.0%} of "
+                f"the model's estimates were this easy or easier. Flagged when it falls "
+                f"outside the middle 80%."
             )
-    st.markdown("**Execution narrative (§8.6)**")
+    st.markdown("**How did the movement hold up?**")
     st.info(a.narrative)
 
 
@@ -217,13 +249,21 @@ def _features_view(a: SetAnalysis) -> None:
     sf = a.features
 
     st.divider()
-    st.subheader("Layer 4 · per-rep features (§6.2)")
+    st.subheader("Per-rep measurements")
+    st.caption(
+        "The raw measurements every score above is built from - one row per rep. This is "
+        "what makes a score debuggable: if a number looks wrong, it traces back to here."
+    )
     b = sf.baseline
     st.caption(
-        f"Baseline: **{b.source}** (n={b.n_reps} reps, "
-        f"{'reliable' if b.is_reliable else 'provisional — §7.1 early-set fallback'})"
+        f"Compared against: **{b.source}** ({b.n_reps} reps). "
+        + ("A trustworthy reference." if b.is_reliable else
+           "Fallback only - this set is compared against its OWN opening reps, so a set "
+           "that started badly will still look consistent.")
     )
 
+    with st.expander("What every column means"):
+        st.markdown(gl.as_markdown_table(gl.FEATURE_TABLE))
     st.dataframe(
         [
             {
@@ -248,12 +288,18 @@ def _features_view(a: SetAnalysis) -> None:
             }
             for r in sf.reps
         ],
-        use_container_width=True,
+        width="stretch",
     )
 
     # Degradation trajectories — each channel on its own normalized axis, since they carry
     # different units. Normalizing to rep 1 shows SHAPE, which is what §6.3 summarises.
-    st.subheader("Degradation trajectories (§6.3)")
+    st.subheader("How each measurement changed across the set")
+    st.caption(
+        "Each line is one measurement divided by its own value on rep 1, so they share an "
+        "axis despite having different units. **1.0 = unchanged from the first rep.** "
+        "Lines falling below 1.0 are degrading (speed, depth); lines rising above it are "
+        "growing (tremor). The steeper the line, the faster that aspect broke down."
+    )
     tfig = go.Figure()
     for ch in ("conc_mean_vel", "rom_vertical", "ecc_duration", "tremor_power_8_12"):
         series = np.array([getattr(r, ch) for r in sf.reps], dtype=float)
@@ -269,9 +315,16 @@ def _features_view(a: SetAnalysis) -> None:
         yaxis=dict(title="value relative to rep 1"),
         legend=dict(orientation="h"),
     )
-    st.plotly_chart(tfig, use_container_width=True)
+    st.plotly_chart(tfig, width="stretch")
 
-    st.subheader("Set-level summaries (§6.3, retrospective)")
+    st.subheader("Trend summaries")
+    st.caption(
+        "Each trajectory above, reduced to numbers. **slope** = average change per rep "
+        "(negative = declining). **curvature** = whether the decline is accelerating. "
+        "**total_change** = fractional change from first rep to last. **breakpoint** = "
+        "the rep index where a two-piece trend fits better than one straight line, i.e. "
+        "roughly where things started going wrong."
+    )
     rows = []
     for ch in KEY_CHANNELS:
         rows.append({
@@ -283,10 +336,12 @@ def _features_view(a: SetAnalysis) -> None:
                 for v in [sf.retrospective.get(f"retro_{ch}_{name}")]
             },
         })
-    st.dataframe(rows, use_container_width=True)
+    st.dataframe(rows, width="stretch")
     st.caption(
-        "Causal summaries (reps 1..r) are computed separately for the RIR head and are "
-        "never mixed with these retrospective values — §6.3 leakage boundary."
+        "These summarise the whole set, so they are only used for scores computed after "
+        "the set ends. The reps-in-reserve estimate, which predicts DURING the set, gets "
+        "a separate version built only from reps seen so far - otherwise it would be "
+        "using the future to predict the future."
     )
 
 

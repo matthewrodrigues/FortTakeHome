@@ -70,3 +70,23 @@ def test_cli_output_states_measured_change_not_coaching_cues(capsys):
     out = capsys.readouterr().out.lower()
     for phrase in banned:
         assert phrase not in out, f"coaching cue {phrase!r} in demo output"
+
+
+# --- Phase 9: planted-bias demo path --------------------------------------------
+
+
+def test_planted_rpe_bias_changes_the_reported_rpe(capsys):
+    """``--rpe-bias`` gives the divergence signal something real to detect: the same
+    session, reported differently by a lifter who systematically under-reports."""
+    main(["--seed", "1", "--rpe-bias", "0"])
+    neutral = capsys.readouterr().out
+    main(["--seed", "1", "--rpe-bias", "-2.5"])
+    biased = capsys.readouterr().out
+    assert neutral != biased, "planted bias did not reach the reported RPE"
+
+
+def test_demo_stays_deterministic_with_the_new_flags(capsys):
+    main(["--seed", "2", "--rpe-bias", "-1.5"])
+    first = capsys.readouterr().out
+    main(["--seed", "2", "--rpe-bias", "-1.5"])
+    assert capsys.readouterr().out == first

@@ -16,8 +16,11 @@ deterministic.
 from __future__ import annotations
 
 import argparse
+import pickle
 import sys
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from wristset.conditioning import ConditionedSet, condition_set
 from wristset.features import RepSource, SetFeatures, extract_set_features
@@ -129,7 +132,23 @@ DEMO_CORPUS_USERS: int = 10
 DEMO_CORPUS_SETS: int = 5
 
 
-def fit_demo_rir_model(seed: int = 0, *, n_users: int = DEMO_CORPUS_USERS):
+#: Where fitted demo heads are cached between runs. The corpus is fully determined by
+#: ``(seed, n_users)`` and the fit is convex from a zero init, so a cached model is
+#: byte-identical to a freshly fitted one — only the ~8 s of generating and conditioning
+#: the corpus is skipped. Delete the directory to force a refit.
+DEMO_CACHE_DIR = Path(tempfile.gettempdir()) / "wristset-demo-cache"
+
+#: Bumped when anything upstream of the fit changes (generator, conditioning, features,
+#: hazard model). A stale cache would otherwise silently serve a model fit on old code.
+_CACHE_VERSION = 1
+
+
+def _cache_path(seed: int, n_users: int) -> Path:
+    return DEMO_CACHE_DIR / f"rir-v{_CACHE_VERSION}-s{seed}-u{n_users}.pkl"
+
+
+def fit_demo_rir_model(seed: int = 0, *, n_users: int = DEMO_CORPUS_USERS,
+                       use_cache: bool = True):
     """Fit a hazard head on a small synthetic population, plus its §9.5 readiness.
 
     Returns ``(model, readiness)``. The model is ``None`` when the corpus does not clear
@@ -152,14 +171,33 @@ def fit_demo_rir_model(seed: int = 0, *, n_users: int = DEMO_CORPUS_USERS):
     )
     from wristset.synth import generate_population
 
+    path = _cache_path(seed, n_users)
+    if use_cache and path.exists():
+        try:
+            with path.open("rb") as fh:
+                return pickle.load(fh)
+        except Exception:
+            # a corrupt or stale-format cache must never break the demo; refit instead
+            path.unlink(missing_ok=True)
+
     corpus = generate_population(
         n_users=n_users, sets_per_user=DEMO_CORPUS_SETS, seed=seed,
     )
     labeled = prepare_sets(corpus)
     readiness = assess_rir_readiness(labeled)
-    if not readiness.available:
-        return None, readiness
-    return HazardModel.fit(build_person_period(labeled)), readiness
+    result = (
+        (None, readiness) if not readiness.available
+        else (HazardModel.fit(build_person_period(labeled)), readiness)
+    )
+
+    if use_cache:
+        try:
+            DEMO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            with path.open("wb") as fh:
+                pickle.dump(result, fh)
+        except OSError:
+            pass  # caching is an optimisation, never a requirement
+    return result
 
 
 # --------------------------------------------------------------------------------
@@ -208,6 +246,11 @@ def main(argv: list[str] | None = None) -> int:
               "and the effort narrative (adds ~7s)"),
     )
     parser.add_argument(
+        "--rpe-bias", type=float, default=0.0,
+        help=("plant a per-lifter RPE reporting bias (points). Negative = under-reports "
+              "effort; with --with-rir this is what the divergence signal detects."),
+    )
+    parser.add_argument(
         "--rir-users", type=int, default=DEMO_CORPUS_USERS,
         help=("how many synthetic lifters of history to supply. Lower values fall below "
               "the 9.5 failure-set minimum and demonstrate RIR staying locked."),
@@ -218,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
         fit_demo_rir_model(seed=args.seed, n_users=args.rir_users)
         if args.with_rir else (None, None)
     )
-    sets = generate_training_session(exercise=args.exercise, seed=args.seed)
+    sets = generate_training_session(
+        exercise=args.exercise, seed=args.seed, rpe_bias=args.rpe_bias,
+    )
     analyses = analyze_session(sets, rir_model=rir_model)
 
     # ASCII-only console text: the demo runs on stock Windows terminals (cp1252), where a
