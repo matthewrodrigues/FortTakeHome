@@ -170,11 +170,11 @@ SUBSCORES: dict[str, str] = {
 CHART_GUIDE: str = """
 **How to read this chart**
 
-- **Blue line - vertical displacement (m).** How high the wrist is. **Troughs are the
+- **Cyan line - vertical displacement (m).** How high the wrist is. **Troughs are the
   bottom of each rep** (weight at its lowest); **peaks are the top**, where the lifter
   locks out. One peak-trough-peak cycle is one rep, so you can count reps by counting
   troughs.
-- **Orange line - vertical velocity (m/s).** How fast the wrist is moving. It crosses zero
+- **Blue line - vertical velocity (m/s).** How fast the wrist is moving. It crosses zero
   at every peak and trough, because the weight has to stop to change direction. Positive =
   moving up, negative = moving down. **Watch the peaks flatten across the set** - that is
   fatigue slowing the lift down.
